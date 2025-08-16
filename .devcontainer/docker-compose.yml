@@ -1,0 +1,15 @@
+name: testsplitter-dev
+services:
+  devcontainer:
+    hostname: testsplitter-dev
+    build:
+      context: .
+    environment:
+      - LANG=ja_JP.UTF-8
+    volumes:
+      - ../:/work/testsplitter-dev
+      - home:/home/vscode
+    command: sleep infinity
+
+volumes:
+  home:

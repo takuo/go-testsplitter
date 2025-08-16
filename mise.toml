@@ -1,0 +1,8 @@
+[settings]
+experimental = true
+
+[tools]
+go = "1.24"
+gotestsum = "latest"
+gofumpt = "latest"
+"go:golang.org/x/tools/gopls" = "latest"

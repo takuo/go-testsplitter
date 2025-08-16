@@ -1,0 +1,78 @@
+{
+    "name": "testsplitter-dev",
+    "dockerComposeFile": [
+        "docker-compose.yml"
+    ],
+    "service": "devcontainer",
+    "workspaceFolder": "/work/testsplitter-dev",
+    "remoteEnv": {
+        "PATH": "/home/vscode/.local/bin:${env:PATH}"
+    },
+    "postCreateCommand": "test -e /home/vscode/.local/bin/mise || $(curl -L https://mise.run | sh && mise upgrade)",
+    "remoteUser": "vscode",
+    // Set *default* container specific settings.json values on container create.
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "[go]": {
+                    "editor.formatOnSave": true,
+                    "editor.trimAutoWhitespace": true,
+                    "formatting.gofumpt": true
+                },
+                "editor.bracketPairColorization.enabled": true,
+                "editor.guides.bracketPairs": "active",
+                //exludes fies & folders for watcher service
+                "files.watcherExclude": {
+                    "**/.git/objects/**": true,
+                    "**/.git/subtree-cache/**": true
+                },
+                "go.formatTool": "gofumpt",
+                "go.formatFlags": [
+                    "-local=github.com/takuo/go-testsplitter/"
+                ],
+                "go.lintTool": "revive",
+                "go.testFlags": [
+                    "-v"
+                ],
+                "terminal.integrated.allowChords": false,
+                "go.testTimeout": "20m",
+                "editor.cursorSmoothCaretAnimation": "explicit",
+                "editor.cursorStyle": "underline",
+                "editor.cursorBlinking": "smooth",
+                "editor.fontFamily": "Cica, Consolas, 'Courier New', monospace",
+                "editor.fontSize": 15,
+                "editor.minimap.renderCharacters": false,
+                "workbench.colorTheme": "Default Dark Modern",
+                "workbench.preferredDarkColorTheme": "Default Dark Modern",
+                "workbench.preferredLightColorTheme": "Default Light Modern",
+                // cursor
+                "workbench.activityBar.orientation": "vertical",
+                "go.ui.semanticTokens": true,
+                "gopls": {
+                    "ui.semanticTokens": true,
+                    "ui.semanticTokenTypes": {
+                        "variable": true,
+                        "type": true,
+                        "function": true,
+                        "keyword": true,
+                        "string": false,
+                        "number": false
+                    },
+                    "formatting.gofumpt": true
+                },
+                "terminal.integrated.defaultProfile.linux": "zsh",
+                "terminal.integrated.shell.linux": "/bin/zsh"
+            },
+            "extensions": [
+                "golang.go",
+                "cobaltblu27.rainbow-highlighter",
+                "oderwat.indent-rainbow",
+                "ms-ceintl.vscode-language-pack-ja",
+                "GitHub.vscode-pull-request-github",
+                "mohsen1.prettify-json",
+                "hverlin.mise-vscode",
+                "docker.docker-compose"
+            ]
+        }
+    }
+}

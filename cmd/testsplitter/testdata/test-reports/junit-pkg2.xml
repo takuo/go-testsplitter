@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="4" failures="0" errors="0" time="0.147736">
+    <testsuite name="pkg2" tests="3" failures="0" errors="0" time="0.295">
+        <testcase name="TestReverse" classname="pkg2" time="0.200"/>
+        <testcase name="TestReverseEmpty" classname="pkg2" time="0.020"/>
+        <testcase name="TestToUpper" classname="pkg2" time="0.075"/>
+    </testsuite>
+</testsuites>

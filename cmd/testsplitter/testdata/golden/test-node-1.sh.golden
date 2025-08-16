@@ -1,0 +1,33 @@
+#!/bin/bash
+
+set -euo pipefail
+
+LINES=$(cat <<'EOF'
+example/pkg3 '^TestMin|TestAbs|TestMax|TestMaxEqual$'
+example/pkg2 '^TestReverseEmpty$'
+example/pkg1 '^TestMultiply$'
+EOF
+)
+
+FLAGS="-test.timeout=20m -test.v"
+count=0
+commands=()
+
+export PATH="/work/testsplitter-dev/cmd/testsplitter/testdata/test-bin:$PATH"
+
+while IFS= read -r line; do
+  if [ -z "$line" ]; then
+    continue
+  fi
+  count=$((count + 1))
+  report="/work/testsplitter-dev/cmd/testsplitter/testdata/test-reports/junit-1-${count}.xml"
+  pkg="${line%% *}"
+  bin="${pkg//\//.}.test"
+  runs="${line#$pkg }"
+
+  CMD="cd ${pkg} && gotestsum -f standard-verbose --packages ${pkg} --rerun-fails --junitfile ${report} --junitfile-testsuite-name relative --junitfile-testcase-classname relative --raw-command -- go tool test2json -t -p ${pkg} ${bin} ${FLAGS} -test.run ${runs}"
+  echo "$CMD"
+  commands+=("$CMD")
+done <<< "$LINES"
+
+printf "\"%s\"\n" "${commands[@]}" | xargs -I {} -P 4 bash -c '{}'
