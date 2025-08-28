@@ -59,7 +59,7 @@ type TemplateData struct {
 	NodeIndex   int
 	Concurrency int
 	TestLines   iter.Seq[TestLine]
-	ReportDir   string
+	JSONDir     string
 	BinariesDir string
 	Flags       string
 }

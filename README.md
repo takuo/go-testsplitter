@@ -6,19 +6,17 @@ Outputs scripts to distribute and run a large number of tests across multiple no
 
 ```bash
 # Basic usage
-go list ./... | testsplitter -n 4 -- -test.timeout=20m -test.v
+go list ./... | testsplitter -n 4 -- -test.timeout=20m
 # with auto scan packages
-testsplitter -s -n 4 -- -test.timeout=20m -test.v
+testsplitter -s -n 4 -- -test.timeout=20m
 # with package exclusion (only for `-s`)
-testsplitter -s -x "TestSomething|TestUnnecessaryCI" -n 4 -- -test.timeout=20m -test.v
+testsplitter -s -x "TestSomething|TestUnnecessaryCI" -n 4 -- -test.timeout=20m
 # with custom script template
-testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m -test.v
+testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
 ```
 
-## Specification
+## Arguments
 
-* Supports running Go language tests
-* Arguments
   | option                      | default             | description                                                                 | variable in template  |
   |-----------------------------|---------------------|-----------------------------------------------------------------------------|-----------------------|
   | -n, --nodes=INT             | 4                   | Number of test execution nodes, NodeIndex is can be refered in template  with {{ .NodeIndex }} |   |
@@ -26,7 +24,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m -test.v
   | -o, --scripts-dir=DIR       | ./test-scripts      | Output directory for scripts                                                |                       |
   | -s, --scan-packages         | (use stdin)         | Scan for package list; if not specified, receives from standard input        |                       |
   | -x, --exclude=PATTERN       | (none)              | Regular expression for packages to exclude when -s is specified              |                       |
-  | -r, --report-dir=DIR        | ./test-reports      | Directory containing previous test results (JUnit Test Report XML)           | {{.ReportDir}}        |
+  | -j, --json-dir=DIR        | ./test-json      | Directory containing previous test results (`go test -json` with package name)           | {{.JSONDir}}        |
   | -m, --max-functions         | 0  (unlimited)      | Maximum number of test functions per invoking a test process                 |                       |
   | -t, --template=FILE         | (built-in)          | Template file for test scripts                                               |                       |
   | -p, --binaries-dir=DIR      | ./test-bin          | Path to test binaries, to output or pre-built                                | {{.BinariesDir}}      |
@@ -40,7 +38,8 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m -test.v
   * Parses the received packages with AST to obtain a list of test functions to execute
   * If the `-s --scan` argument is specified, all packages under the current directory are targeted
     * With `-s`, you can also specify packages to exclude using `-x --exclude PATTERN`
-* For previous execution results, recursively reads all JUnit Test Report XML files under the directory specified by `-r`
+* For previous execution results, recursively reads all JSON files under the directory specified by `-j`
+  * JSON files are expected to be in the format output by `go test -json` with Package name. (`go tool test2json -p "pkgname"`)
   * Tests not found in previous results are distributed appropriately
 * Built-in template: `internal/templates/test-node.sh.tmpl`
   * Assumes that test binaries for the packages to be executed are pre-built (instead of `go test`), and changes the current directory to the package directory when running tests
@@ -48,7 +47,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m -test.v
   * Execution is divided by package, resulting in commands like `./test-bin/foo.bar.test -test.v -test.timeout=20m -test.run "^TestFooBar|TestHogeMoge$"`
     * However, since distribution is at the test function level, the same package may be tested on multiple nodes, but duplication is avoided by specifying `-test.run`
   * Uses `xargs -P` for parallel execution within a node
-  * Tests are run via gotestsum, and junit report files are output in the format `./test-reports/junit-[NODE INDEX]-[EXECUTE NUMBER].xml`
+  * Tests are run via gotestsum, and JSON files are output in the format `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].json`
   * You can use own custom template with `-t` option.
 
 ## Examples
@@ -95,7 +94,7 @@ jobs:
           command: |
             export GOGC=off CGO_ENABLED=0
             go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
-            testsplitter -n << pipeline.parameters.test-parallelism >> -s -b 7 -c 4 -m 20 -- -test.v -test.timeout=10m
+            testsplitter -n << pipeline.parameters.test-parallelism >> -s -b 7 -c 4 -m 20 -- -test.timeout=10m
       - save_cache:
           name: Saving build cache
           key: *build-cache
@@ -136,9 +135,9 @@ jobs:
           path: test-reports
       - persist_to_workspace:
           root: /home/circleci/project
-          name: Saving test result
+          name: Saving test json output
           paths:
-            - test-reports
+            - test-json
   save-test-result:
     resource_class: small
     docker:
@@ -147,10 +146,10 @@ jobs:
       - attach_workspace:
           at: /home/circleci/project
       - save_cache:
-          name: Saving JUnit Test Reports
+          name: Saving JSON Test Reports
           key: *test-results-cache
           paths:
-            - /home/circleci/project/test-reports
+            - /home/circleci/project/test-json
 
 workflows:
   build-test:

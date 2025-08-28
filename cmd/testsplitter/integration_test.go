@@ -82,7 +82,7 @@ func TestWithPreviousResults(t *testing.T) {
 
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "testsplitter should run successfully. Output: %s", output)
-	assert.Contains(t, string(output), "Loaded 12 testcases durations from 3 files in ./test-reports", "Should load previous test durations")
+	assert.Contains(t, string(output), "Loaded 9 testcases durations from 3 files in ./test-json", "Should load previous test durations")
 	t.Log(string(output))
 
 	// Check that output files were created

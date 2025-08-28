@@ -1,0 +1,6 @@
+{"Time": "2023-01-01T00:00:00.000Z", "Action": "run", "Package": "example/pkg1", "Test": "TestMultiply"}
+{"Time": "2023-01-01T00:00:01.000Z", "Action": "pass", "Package": "example/pkg1", "Test": "TestMultiply", "Elapsed": 0.123}
+{"Time": "2023-01-01T00:00:02.000Z", "Action": "run", "Package": "example/pkg2", "Test": "TestToUpper"}
+{"Time": "2023-01-01T00:00:03.000Z", "Action": "fail", "Package": "example/pkg2", "Test": "TestToUpper", "Elapsed": 0.456}
+{"Time": "2023-01-01T00:00:04.000Z", "Action": "run", "Package": "example/pkg3", "Test": "TestMin"}
+{"Time": "2023-01-01T00:00:05.000Z", "Action": "pass", "Package": "example/pkg3", "Test": "TestMin", "Elapsed": 0.789}

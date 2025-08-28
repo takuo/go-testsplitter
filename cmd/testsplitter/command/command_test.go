@@ -64,8 +64,8 @@ func TestCreateTestInfos(t *testing.T) {
 			"pkg2": {"TestC"},
 		},
 		testDurations: map[string]time.Duration{
-			"pkg1.TestA": 10 * time.Second,
-			"pkg2.TestC": 5 * time.Second,
+			"pkg1:TestA": 10 * time.Second,
+			"pkg2:TestC": 5 * time.Second,
 		},
 	}
 

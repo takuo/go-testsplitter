@@ -18,14 +18,18 @@ while IFS= read -r line; do
     continue
   fi
   count=$((count + 1))
-  report="{{.ReportDir}}/junit-{{.NodeIndex}}-${count}.xml"
+  report="test-reports/junit-{{.NodeIndex}}-${count}.xml"
+  json="{{.JSONDir}}/test-{{.NodeIndex}}-${count}.json"
   pkg="${line%% *}"
   bin="${pkg//\//.}.test"
   runs="${line#$pkg }"
 
-  CMD="cd ${pkg} && gotestsum -f standard-verbose --packages ${pkg} --rerun-fails --junitfile ${report} --junitfile-testsuite-name relative --junitfile-testcase-classname relative --raw-command -- go tool test2json -t -p ${pkg} ${bin} ${FLAGS} -test.run ${runs}"
+  CMD="cd ${pkg} && gotestsum -f standard-verbose --jsonfile ${json} --packages ${pkg} --rerun-fails --junitfile ${report} --junitfile-testsuite-name relative --junitfile-testcase-classname relative --raw-command -- go tool test2json -t -p ${pkg} ${bin} ${FLAGS} -test.v=test2json -test.run ${runs}"
   echo "$CMD"
   commands+=("$CMD")
 done <<< "$LINES"
 
 printf "\"%s\"\n" "${commands[@]}" | xargs -I {} -P {{.Concurrency}} bash -c '{}'
+
+cat {{.JSONDir}}/*.json > {{.JSONDir}}/test-{{.NodeIndex}}.json || true
+rm {{.JSONDir}}/test-{{.NodeIndex}}-*.json || true

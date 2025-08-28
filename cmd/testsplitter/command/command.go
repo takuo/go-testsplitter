@@ -3,11 +3,11 @@ package command
 
 import (
 	"bufio"
-	"encoding/xml"
 	"fmt"
 	"io/fs"
 	"iter"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +18,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/sourcegraph/conc/pool"
+	"github.com/takuo/go-testsplitter/internal/parser"
 	"github.com/takuo/go-testsplitter/internal/scanner"
 	"github.com/takuo/go-testsplitter/internal/templates"
 	"github.com/takuo/go-testsplitter/internal/types"
@@ -31,7 +32,7 @@ type CLI struct {
 	ScriptsDir   string   `short:"o" long:"scripts-dir" required:"" default:"./test-scripts" help:"Directory to output generated scripts"`
 	ScanPackages bool     `short:"s" long:"scan-packages" help:"Scan Go packages from the current directory (like 'go list'). If not specified, package list is read from stdin."`
 	Exclude      string   `short:"x" long:"exclude" help:"Regex pattern to exclude packages (used only with --scan-packages)"`
-	ReportDir    string   `short:"r" long:"report-dir" default:"./test-reports" help:"Directory containing JUnit XML test reports"`
+	JSONDir      string   `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
 	Template     string   `short:"t" long:"template" help:"Path to the template file (optional)"`
 	MaxFunctions int      `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per package (0: unlimited)"`
 	TestFlags    []string `arg:"" help:"Flags to pass to the test binary after --" optional:""`
@@ -136,51 +137,31 @@ func (c *CLI) scanTestFunctions() (err error) {
 }
 
 func (c *CLI) loadTestDurations() (err error) {
-	var (
-		files int
-		cases int
-	)
+	var files int
 
 	c.testDurations = make(map[string]time.Duration)
 
-	err = filepath.WalkDir(c.ReportDir, func(path string, _ fs.DirEntry, err error) error {
+	err = filepath.WalkDir(c.JSONDir, func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip files that can't be accessed
 		}
 
-		if !strings.HasSuffix(path, ".xml") {
+		if !strings.HasSuffix(path, ".json") {
 			return nil
 		}
 
-		data, err := os.ReadFile(path)
+		fp, err := os.OpenFile(path, os.O_RDONLY, 0)
 		if err != nil {
 			log.Printf("Failed to read %s: %v\n", path, err)
 			return nil // Skip files that can't be read
 		}
-
-		type suites struct {
-			XMLName    xml.Name          `xml:"testsuites"`
-			TestSuites []types.TestSuite `xml:"testsuite"`
-		}
-		var xmlData suites
-		if err := xml.Unmarshal(data, &xmlData); err != nil {
-			log.Printf("Failed to parse XML from %s: %v\n", path, err)
-			return nil // Skip files that can't be parsed
-		}
+		defer fp.Close()
+		data := parser.ParseGoTestJSON(bufio.NewScanner(fp))
 		files++
-		for _, suite := range xmlData.TestSuites {
-			for _, testCase := range suite.TestCases {
-				if strings.Contains(testCase.Name, "/") {
-					continue
-				}
-				key := fmt.Sprintf("%s.%s", suite.Name, testCase.Name)
-				c.testDurations[key] = time.Duration(testCase.Time * float64(time.Second))
-				cases++
-			}
-		}
+		maps.Copy(c.testDurations, data)
 		return nil
 	})
-	log.Printf("Loaded %d testcases durations from %d files in %s\n", cases, files, c.ReportDir)
+	log.Printf("Loaded %d testcases durations from %d files in %s\n", len(c.testDurations), files, c.JSONDir)
 	return err
 }
 
@@ -189,7 +170,7 @@ func (c *CLI) createTestInfos() {
 
 	for pkg, functions := range c.testFunctions {
 		for _, fn := range functions {
-			key := fmt.Sprintf("%s.%s", pkg, fn)
+			key := fmt.Sprintf("%s:%s", pkg, fn)
 			duration := c.testDurations[key]
 			if duration == 0 {
 				// Default duration for unknown tests
@@ -291,16 +272,16 @@ func (c *CLI) generateScriptFiles() error {
 		if err != nil {
 			return fmt.Errorf("failed to get absolute binary path: %w", err)
 		}
-		reportDir, err := filepath.Abs(c.ReportDir)
+		JSONDir, err := filepath.Abs(c.JSONDir)
 		if err != nil {
-			return fmt.Errorf("failed to get absolute report directory: %w", err)
+			return fmt.Errorf("failed to get absolute JSON directory: %w", err)
 		}
 		templateData := types.TemplateData{
 			NodeIndex:   nt.NodeIndex,
 			Concurrency: c.Concurrency,
 			TestLines:   linesSeq,
 			Flags:       strings.Join(c.TestFlags, " "),
-			ReportDir:   strings.TrimSuffix(reportDir, "/"),
+			JSONDir:     strings.TrimSuffix(JSONDir, "/"),
 			BinariesDir: strings.TrimSuffix(path, "/"),
 		}
 

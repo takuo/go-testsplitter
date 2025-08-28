@@ -3,9 +3,9 @@
 set -euo pipefail
 
 LINES=$(cat <<'EOF'
-example/pkg3 '^TestMin|TestAbs|TestMax|TestMaxEqual$'
-example/pkg2 '^TestReverseEmpty$'
-example/pkg1 '^TestMultiply$'
+example/pkg3 '^(TestAbs)$'
+example/pkg1 '^(TestMultiplyZero|TestAdd|TestAddNegative)$'
+example/pkg2 '^(TestReverse|TestReverseEmpty)$'
 EOF
 )
 
@@ -20,14 +20,18 @@ while IFS= read -r line; do
     continue
   fi
   count=$((count + 1))
-  report="/work/testsplitter-dev/cmd/testsplitter/testdata/test-reports/junit-1-${count}.xml"
+  report="test-reports/junit-1-${count}.xml"
+  json="/work/testsplitter-dev/cmd/testsplitter/testdata/test-json/test-1-${count}.json"
   pkg="${line%% *}"
   bin="${pkg//\//.}.test"
   runs="${line#$pkg }"
 
-  CMD="cd ${pkg} && gotestsum -f standard-verbose --packages ${pkg} --rerun-fails --junitfile ${report} --junitfile-testsuite-name relative --junitfile-testcase-classname relative --raw-command -- go tool test2json -t -p ${pkg} ${bin} ${FLAGS} -test.run ${runs}"
+  CMD="cd ${pkg} && gotestsum -f standard-verbose --jsonfile ${json} --packages ${pkg} --rerun-fails --junitfile ${report} --junitfile-testsuite-name relative --junitfile-testcase-classname relative --raw-command -- go tool test2json -t -p ${pkg} ${bin} ${FLAGS} -test.v=test2json -test.run ${runs}"
   echo "$CMD"
   commands+=("$CMD")
 done <<< "$LINES"
 
 printf "\"%s\"\n" "${commands[@]}" | xargs -I {} -P 4 bash -c '{}'
+
+cat /work/testsplitter-dev/cmd/testsplitter/testdata/test-json/*.json > /work/testsplitter-dev/cmd/testsplitter/testdata/test-json/test-1.json || true
+rm /work/testsplitter-dev/cmd/testsplitter/testdata/test-json/test-1-*.json || true

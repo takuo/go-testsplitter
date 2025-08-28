@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuites tests="4" failures="0" errors="0" time="0.2">
-    <testsuite name="pkg1" tests="4" failures="0" errors="0" time="0.165">
-        <testcase name="TestAdd" classname="pkg1" time="0.100"/>
-        <testcase name="TestAddNegative" classname="pkg1" time="0.010"/>
-        <testcase name="TestMultiply" classname="pkg1" time="0.050"/>
-        <testcase name="TestMultiplyZero" classname="pkg1" time="0.005"/>
-    </testsuite>
-</testsuites>
