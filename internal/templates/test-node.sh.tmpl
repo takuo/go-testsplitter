@@ -8,6 +8,7 @@ LINES=$(cat <<'EOF'
 )
 
 FLAGS="{{.Flags}}"
+CWD="$(pwd)"
 count=0
 commands=()
 
@@ -18,7 +19,7 @@ while IFS= read -r line; do
     continue
   fi
   count=$((count + 1))
-  report="test-reports/junit-{{.NodeIndex}}-${count}.xml"
+  report="${CWD}/test-reports/junit-{{.NodeIndex}}-${count}.xml"
   json="{{.JSONDir}}/test-{{.NodeIndex}}-${count}.json"
   pkg="${line%% *}"
   bin="${pkg//\//.}.test"
