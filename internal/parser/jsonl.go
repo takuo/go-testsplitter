@@ -21,8 +21,8 @@ type testRecord struct {
 	End   time.Time
 }
 
-// ParseGoTestJSON parse go test -json output from a bufio.Scanner
-func ParseGoTestJSON(scanner *bufio.Scanner) map[string]time.Duration {
+// ParseGoTestJSONL parse `go test -json` output (JSON Lines) from a bufio.Scanner
+func ParseGoTestJSONL(scanner *bufio.Scanner) map[string]time.Duration {
 	records := make(map[string]*testRecord)
 	for scanner.Scan() {
 		var ev testEvent

@@ -3,13 +3,14 @@
 set -euo pipefail
 
 LINES=$(cat <<'EOF'
-example/pkg3 '^(TestAbs)$'
 example/pkg1 '^(TestMultiplyZero|TestAdd|TestAddNegative)$'
-example/pkg2 '^(TestReverse|TestReverseEmpty)$'
+example/pkg2 '^(TestReverse)$'
+example/pkg3 '^(TestMaxEqual)$'
 EOF
 )
 
 FLAGS="-test.timeout=20m -test.v"
+CWD="$(pwd)"
 count=0
 commands=()
 
@@ -20,8 +21,8 @@ while IFS= read -r line; do
     continue
   fi
   count=$((count + 1))
-  report="test-reports/junit-1-${count}.xml"
-  json="/work/testsplitter-dev/cmd/testsplitter/testdata/test-json/test-1-${count}.json"
+  report="${CWD}/test-reports/junit-1-${count}.xml"
+  json="/work/testsplitter-dev/cmd/testsplitter/testdata/test-json/test-1-${count}.jsonl"
   pkg="${line%% *}"
   bin="${pkg//\//.}.test"
   runs="${line#$pkg }"

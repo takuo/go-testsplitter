@@ -146,7 +146,9 @@ func (c *CLI) loadTestDurations() (err error) {
 			return nil // Skip files that can't be accessed
 		}
 
-		if !strings.HasSuffix(path, ".json") {
+		switch filepath.Ext(path) {
+		case ".jsonl", ".json":
+		default:
 			return nil
 		}
 
@@ -156,7 +158,7 @@ func (c *CLI) loadTestDurations() (err error) {
 			return nil // Skip files that can't be read
 		}
 		defer fp.Close()
-		data := parser.ParseGoTestJSON(bufio.NewScanner(fp))
+		data := parser.ParseGoTestJSONL(bufio.NewScanner(fp))
 		files++
 		maps.Copy(c.testDurations, data)
 		return nil

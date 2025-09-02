@@ -20,7 +20,7 @@ while IFS= read -r line; do
   fi
   count=$((count + 1))
   report="${CWD}/test-reports/junit-{{.NodeIndex}}-${count}.xml"
-  json="{{.JSONDir}}/test-{{.NodeIndex}}-${count}.json"
+  json="{{.JSONDir}}/test-{{.NodeIndex}}-${count}.jsonl"
   pkg="${line%% *}"
   bin="${pkg//\//.}.test"
   runs="${line#$pkg }"
