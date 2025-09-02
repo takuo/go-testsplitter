@@ -24,7 +24,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   | -o, --scripts-dir=DIR       | ./test-scripts      | Output directory for scripts                                                |                       |
   | -s, --scan-packages         | (use stdin)         | Scan for package list; if not specified, receives from standard input        |                       |
   | -x, --exclude=PATTERN       | (none)              | Regular expression for packages to exclude when -s is specified              |                       |
-  | -j, --json-dir=DIR        | ./test-json      | Directory containing previous test results (`go test -json` with package name)           | {{.JSONDir}}        |
+  | -j, --json-dir=DIR        | ./test-json      | Directory containing previous test results(JSONL)  (`go test -json` with package name)           | {{.JSONDir}}        |
   | -m, --max-functions         | 0  (unlimited)      | Maximum number of test functions per invoking a test process                 |                       |
   | -t, --template=FILE         | (built-in)          | Template file for test scripts                                               |                       |
   | -p, --binaries-dir=DIR      | ./test-bin          | Path to test binaries, to output or pre-built                                | {{.BinariesDir}}      |
@@ -39,7 +39,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   * If the `-s --scan` argument is specified, all packages under the current directory are targeted
     * With `-s`, you can also specify packages to exclude using `-x --exclude PATTERN`
 * For previous execution results, recursively reads all JSON files under the directory specified by `-j`
-  * JSON files are expected to be in the format output by `go test -json` with Package name. (`go tool test2json -p "pkgname"`)
+  * JSONL files are expected to be in the format output by `go test -json` with Package name. (`go tool test2json -p "pkgname"`)
   * Tests not found in previous results are distributed appropriately
 * Built-in template: `internal/templates/test-node.sh.tmpl`
   * Assumes that test binaries for the packages to be executed are pre-built (instead of `go test`), and changes the current directory to the package directory when running tests
@@ -47,7 +47,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   * Execution is divided by package, resulting in commands like `./test-bin/foo.bar.test -test.v -test.timeout=20m -test.run "^TestFooBar|TestHogeMoge$"`
     * However, since distribution is at the test function level, the same package may be tested on multiple nodes, but duplication is avoided by specifying `-test.run`
   * Uses `xargs -P` for parallel execution within a node
-  * Tests are run via gotestsum, and JSON files are output in the format `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].json`
+  * Tests are run via gotestsum, and JSONL files are output in the format `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl`
   * You can use own custom template with `-t` option.
 
 ## Examples

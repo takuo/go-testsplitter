@@ -25,7 +25,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   | -o, --scripts-dir=DIR        | ./test-scripts       | スクリプトの出力ディレクトリ                                         |                          |
   | -s, --scan-packages          | (標準入力)           | パッケージリストをスキャン。指定しない場合は標準入力から受け取る      |                          |
   | -x, --exclude=PATTERN        | (なし)               | `-s` 指定時に除外するパッケージの正規表現                               |                          |
-  | -j, --json-dir=DIR           | ./test-json          | 過去のテスト結果(go test -json 出力)のディレクトリ                      | {{ .JSONDir }}         |
+  | -j, --json-dir=DIR           | ./test-json          | 過去のテスト結果(JSONL) (`go test -json` 出力)のディレクトリ                      | {{ .JSONDir }}         |
   | -m, --max-functions          | 0 (無制限)           | 1プロセスあたりの最大テスト関数の数                                    |                          |
   | -t, --template=FILE          | (組み込み)           | テストスクリプトのテンプレートファイル                               |                          |
   | -p, --binaries-dir=DIR       | ./test-bin           | テストバイナリの出力/事前ビルド先                                   | {{ .BinariesDir }}       |
@@ -39,7 +39,7 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   * 受け取ったパッケージをASTで解析し、実行対象のテスト関数リストを取得
   * `-s --scan` 指定時はカレントディレクトリ配下の全パッケージが対象
     * `-s` では `-x --exclude PATTERN` で除外パッケージ指定も可能
-* 過去の実行結果は `-j` で指定したディレクトリ配下のJSON(`go test -json`)を再帰的に読み込む
+* 過去の実行結果は `-j` で指定したディレクトリ配下のJSONL(`go test -json`)を再帰的に読み込む
   * 過去結果にないテストは実行時間を暫定的に5秒として適切に分散
 * テストバイナリは自動で事前ビルドされ、`./test-bin` に出力される (`-p`オプションで変更可能)
   * `-b` オプションで並列ビルド数を指定可能
@@ -50,10 +50,10 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
     * 同一パッケージが複数ノードで実行される場合もあるが、`-test.run` で関数単位で実行するため重複実行は回避
     * 一つのプロセスで実行するテスト関数の数を制限可能 (`-m`)
   * ノード内並列実行には `xargs -P` を利用
-  * テストは `gotestsum` 経由で実行し、JSON出力レポートは `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].xml` 形式で出力
+  * テストは `gotestsum` 経由で実行し、JSONL出力レポートは `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl` 形式で出力
     * `./test-json` は `-j` で指定したディレクトリ
   * `-t` オプションで独自テンプレートも利用可能
-* テストスクリプトは `./test-scripts/test-node-$NODE_INDEX.sh` のように出力されるので、CI などで NODE_INDEX ごとに分散して実行する
+* テストスクリプトは `./test-scripts/test-node-$NODE_INDEX.sh` のように出力されるので、CI などでは NODE_INDEX ごとに分散して実行する
 
 ## 例
 
