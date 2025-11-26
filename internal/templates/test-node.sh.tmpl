@@ -32,5 +32,5 @@ done <<< "$LINES"
 
 printf "\"%s\"\n" "${commands[@]}" | xargs -I {} -P {{.Concurrency}} bash -c '{}'
 
-cat {{.JSONDir}}/*.json > {{.JSONDir}}/test-{{.NodeIndex}}.json || true
-rm {{.JSONDir}}/test-{{.NodeIndex}}-*.json || true
+cat {{.JSONDir}}/test-{{.NodeIndex}}-*.jsonl > {{.JSONDir}}/test-{{.NodeIndex}}.jsonl || true
+rm {{.JSONDir}}/test-{{.NodeIndex}}-*.jsonl || true
