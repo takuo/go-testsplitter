@@ -39,10 +39,15 @@ type Error struct {
 	Text    string `xml:",chardata"`
 }
 
-// TestInfo holds information about a test function
-type TestInfo struct {
+// TestKey identifies a top-level test function in a package.
+type TestKey struct {
 	Package  string
 	Function string
+}
+
+// TestInfo holds information about a test function
+type TestInfo struct {
+	TestKey
 	Duration time.Duration
 }
 

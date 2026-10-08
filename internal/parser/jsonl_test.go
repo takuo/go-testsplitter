@@ -7,10 +7,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/takuo/go-testsplitter/internal/types"
 )
 
-func key(pkg, fn string) string {
-	return pkg + ":" + fn
+func key(pkg, fn string) types.TestKey {
+	return types.TestKey{Package: pkg, Function: fn}
 }
 
 func TestParseGoTestJSONL(t *testing.T) {
@@ -30,7 +32,7 @@ not a json line
 
 	got, err := ParseGoTestJSONL(strings.NewReader(input))
 	require.NoError(t, err)
-	assert.Equal(t, map[string]time.Duration{
+	assert.Equal(t, map[types.TestKey]time.Duration{
 		key("pkg", "TestA"):    1500 * time.Millisecond, // Elapsed
 		key("pkg", "TestB"):    250 * time.Millisecond,  // fallback to Time difference
 		key("pkg", "TestFast"): 0,                       // known, but fast
@@ -45,7 +47,7 @@ func TestParseGoTestJSONL_Rerun(t *testing.T) {
 `
 	got, err := ParseGoTestJSONL(strings.NewReader(input))
 	require.NoError(t, err)
-	assert.Equal(t, map[string]time.Duration{key("pkg", "TestA"): 2 * time.Second}, got)
+	assert.Equal(t, map[types.TestKey]time.Duration{key("pkg", "TestA"): 2 * time.Second}, got)
 }
 
 func TestParseGoTestJSONL_LongLine(t *testing.T) {
@@ -58,7 +60,7 @@ func TestParseGoTestJSONL_LongLine(t *testing.T) {
 
 	got, err := ParseGoTestJSONL(strings.NewReader(input))
 	require.NoError(t, err)
-	assert.Equal(t, map[string]time.Duration{
+	assert.Equal(t, map[types.TestKey]time.Duration{
 		key("pkg", "TestA"): 1 * time.Second,
 		key("pkg", "TestB"): 2 * time.Second,
 	}, got)

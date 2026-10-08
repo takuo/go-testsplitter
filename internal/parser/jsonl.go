@@ -11,6 +11,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/takuo/go-testsplitter/internal/types"
 )
 
 type testEvent struct {
@@ -24,9 +26,9 @@ type testEvent struct {
 // ParseGoTestJSONL parses `go test -json` output (JSON Lines) and returns durations of top-level tests.
 // Subtests are ignored. Lines that are not valid JSON are skipped.
 // If a test appears more than once (e.g. rerun), the last result wins.
-func ParseGoTestJSONL(r io.Reader) (map[string]time.Duration, error) {
-	starts := make(map[string]time.Time)
-	results := make(map[string]time.Duration)
+func ParseGoTestJSONL(r io.Reader) (map[types.TestKey]time.Duration, error) {
+	starts := make(map[types.TestKey]time.Time)
+	results := make(map[types.TestKey]time.Duration)
 
 	br := bufio.NewReader(r)
 	for lineNo := 1; ; lineNo++ {
@@ -43,7 +45,7 @@ func ParseGoTestJSONL(r io.Reader) (map[string]time.Duration, error) {
 	}
 }
 
-func parseLine(line []byte, lineNo int, starts map[string]time.Time, results map[string]time.Duration) {
+func parseLine(line []byte, lineNo int, starts map[types.TestKey]time.Time, results map[types.TestKey]time.Duration) {
 	var ev testEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
 		log.Printf("Skipping invalid JSON at line %d: %v", lineNo, err)
@@ -53,7 +55,7 @@ func parseLine(line []byte, lineNo int, starts map[string]time.Time, results map
 		// ignore package-level events and subtests
 		return
 	}
-	key := ev.Package + ":" + ev.Test
+	key := types.TestKey{Package: ev.Package, Function: ev.Test}
 
 	switch ev.Action {
 	case "run":

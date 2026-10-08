@@ -27,18 +27,22 @@ import (
 	"github.com/takuo/go-testsplitter/pkg/durchunk"
 )
 
+// fallbackDuration is used for tests without previous results when no results are available at all.
+const fallbackDuration = 5 * time.Second
+
 // CLI main command line interface
 type CLI struct {
-	Nodes        int      `short:"n" long:"nodes" required:"" default:"4" help:"Number of nodes"`
-	Concurrency  int      `short:"c" long:"concurrency" default:"4" help:"Number of concurrent test executions per node"`
-	ScriptsDir   string   `short:"o" long:"scripts-dir" required:"" default:"./test-scripts" help:"Directory to output generated scripts"`
-	ScanPackages bool     `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
-	Exclude      string   `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
-	JSONDir      string   `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
-	Template     string   `short:"t" long:"template" help:"Path to the template file (optional)"`
-	MaxFunctions int      `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per package (0: unlimited)"`
-	Seed         uint64   `long:"seed" default:"1" help:"Random seed for splitting (the same input and seed produce the same scripts)"`
-	TestFlags    []string `arg:"" help:"Flags to pass to the test binary after --" optional:""`
+	Nodes           int           `short:"n" long:"nodes" required:"" default:"4" help:"Number of nodes"`
+	Concurrency     int           `short:"c" long:"concurrency" default:"4" help:"Number of concurrent test executions per node"`
+	ScriptsDir      string        `short:"o" long:"scripts-dir" required:"" default:"./test-scripts" help:"Directory to output generated scripts"`
+	ScanPackages    bool          `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
+	Exclude         string        `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
+	JSONDir         string        `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
+	Template        string        `short:"t" long:"template" help:"Path to the template file (optional)"`
+	MaxFunctions    int           `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per package (0: unlimited)"`
+	Seed            uint64        `long:"seed" default:"1" help:"Random seed for splitting (the same input and seed produce the same scripts)"`
+	DefaultDuration time.Duration `long:"default-duration" default:"0s" help:"Duration assumed for tests without previous results (0: median of known durations, or 5s)"`
+	TestFlags       []string      `arg:"" help:"Flags to pass to the test binary after --" optional:""`
 
 	BinariesDir      string `short:"p" long:"binaries-dir" default:"./test-bin" help:"Directory to output or containing test binaries"`
 	BuildConcurrency int    `short:"b" long:"build-concurrency" default:"4" help:"Concurrency for building test binaries"`
@@ -47,12 +51,12 @@ type CLI struct {
 	Version kong.VersionFlag `short:"v" long:"version" help:"Print version and exit"`
 
 	// Runtime context
-	packages      []scanner.Package         `kong:"-"`
-	testFunctions map[string][]string       `kong:"-"`
-	testDurations map[string]time.Duration  `kong:"-"`
-	testInfos     []types.TestInfo          `kong:"-"`
-	nodeTests     iter.Seq[*types.NodeTest] `kong:"-"`
-	template      string                    `kong:"-"`
+	packages      []scanner.Package               `kong:"-"`
+	testFunctions map[string][]string             `kong:"-"`
+	testDurations map[types.TestKey]time.Duration `kong:"-"`
+	testInfos     []types.TestInfo                `kong:"-"`
+	nodeTests     iter.Seq[*types.NodeTest]       `kong:"-"`
+	template      string                          `kong:"-"`
 }
 
 // Validate validates the command line arguments (called by kong).
@@ -69,6 +73,9 @@ func (c *CLI) Validate() error {
 	}
 	if c.MaxFunctions < 0 {
 		errs = append(errs, errors.New("--max-functions must be >= 0"))
+	}
+	if c.DefaultDuration < 0 {
+		errs = append(errs, errors.New("--default-duration must be >= 0"))
 	}
 	if c.Exclude != "" {
 		if _, err := regexp.Compile(c.Exclude); err != nil {
@@ -172,7 +179,7 @@ func (c *CLI) scanTestFunctions() (err error) {
 func (c *CLI) loadTestDurations() (err error) {
 	var files int
 
-	c.testDurations = make(map[string]time.Duration)
+	c.testDurations = make(map[types.TestKey]time.Duration)
 
 	err = filepath.WalkDir(c.JSONDir, func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
@@ -197,7 +204,7 @@ func (c *CLI) loadTestDurations() (err error) {
 	return err
 }
 
-func parseJSONFile(path string) (map[string]time.Duration, error) {
+func parseJSONFile(path string) (map[types.TestKey]time.Duration, error) {
 	fp, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -206,33 +213,47 @@ func parseJSONFile(path string) (map[string]time.Duration, error) {
 	return parser.ParseGoTestJSONL(fp)
 }
 
-func (c *CLI) createTestInfos() {
-	c.testInfos = []types.TestInfo{}
+// defaultDuration returns the duration assumed for tests without previous results.
+func (c *CLI) defaultDuration() time.Duration {
+	if c.DefaultDuration > 0 {
+		return c.DefaultDuration
+	}
+	if len(c.testDurations) == 0 {
+		return fallbackDuration
+	}
+	durations := make([]time.Duration, 0, len(c.testDurations))
+	for _, d := range c.testDurations {
+		durations = append(durations, d)
+	}
+	slices.Sort(durations)
+	return durations[len(durations)/2]
+}
 
+func (c *CLI) createTestInfos() {
+	def := c.defaultDuration()
+	c.testInfos = nil
+
+	unknown := 0
 	for _, pkg := range slices.Sorted(maps.Keys(c.testFunctions)) {
 		for _, fn := range c.testFunctions[pkg] {
-			key := fmt.Sprintf("%s:%s", pkg, fn)
-			duration := c.testDurations[key]
-			if duration == 0 {
-				// Default duration for unknown tests
-				duration = 5 * time.Second
+			key := types.TestKey{Package: pkg, Function: fn}
+			duration, ok := c.testDurations[key]
+			if !ok {
+				duration = def
+				unknown++
 			}
-
-			c.testInfos = append(c.testInfos, types.TestInfo{
-				Package:  pkg,
-				Function: fn,
-				Duration: duration,
-			})
+			c.testInfos = append(c.testInfos, types.TestInfo{TestKey: key, Duration: duration})
 		}
+	}
+	if unknown > 0 {
+		log.Printf("%d of %d tests have no previous results, assuming %s each", unknown, len(c.testInfos), def)
 	}
 }
 
 func (c *CLI) splitTests() {
-	var dataSeq iter.Seq2[string, time.Duration]
-	dataSeq = func(yield func(k string, d time.Duration) bool) {
+	dataSeq := func(yield func(types.TestKey, time.Duration) bool) {
 		for _, test := range c.testInfos {
-			key := fmt.Sprintf("%s:%s", test.Package, test.Function)
-			if !yield(key, test.Duration) {
+			if !yield(test.TestKey, test.Duration) {
 				return
 			}
 		}
@@ -247,12 +268,10 @@ func (c *CLI) splitTests() {
 				TotalDuration: chunk.Total,
 			}
 			for _, key := range chunk.Keys {
-				s := strings.Index(key, ":")
-				pkg, fn := key[:s], key[s+1:]
-				if _, ok := nt.Funcs[pkg]; !ok {
-					nt.Packages = append(nt.Packages, pkg)
+				if _, ok := nt.Funcs[key.Package]; !ok {
+					nt.Packages = append(nt.Packages, key.Package)
 				}
-				nt.Funcs[pkg] = append(nt.Funcs[pkg], fn)
+				nt.Funcs[key.Package] = append(nt.Funcs[key.Package], key.Function)
 			}
 			if !yield(nt) {
 				return

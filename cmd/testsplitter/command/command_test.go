@@ -14,6 +14,10 @@ import (
 	"github.com/takuo/go-testsplitter/internal/types"
 )
 
+func key(pkg, fn string) types.TestKey {
+	return types.TestKey{Package: pkg, Function: fn}
+}
+
 func TestValidate(t *testing.T) {
 	valid := CLI{Nodes: 1, Concurrency: 1, BuildConcurrency: 1}
 	require.NoError(t, valid.Validate())
@@ -23,6 +27,7 @@ func TestValidate(t *testing.T) {
 		"concurrency":       func(c *CLI) { c.Concurrency = 0 },
 		"build-concurrency": func(c *CLI) { c.BuildConcurrency = 0 },
 		"max-functions":     func(c *CLI) { c.MaxFunctions = -1 },
+		"default-duration":  func(c *CLI) { c.DefaultDuration = -time.Second },
 		"exclude":           func(c *CLI) { c.Exclude = "(" },
 	}
 	for name, mutate := range cases {
@@ -37,28 +42,33 @@ func TestValidate(t *testing.T) {
 func TestCreateTestInfos(t *testing.T) {
 	cli := &CLI{
 		testFunctions: map[string][]string{
+			"pkg2": {"TestC", "TestD"},
 			"pkg1": {"TestA", "TestB"},
-			"pkg2": {"TestC"},
 		},
-		testDurations: map[string]time.Duration{
-			"pkg1:TestA": 10 * time.Second,
-			"pkg2:TestC": 5 * time.Second,
+		testDurations: map[types.TestKey]time.Duration{
+			key("pkg1", "TestA"):  10 * time.Second,
+			key("pkg2", "TestC"):  0, // known fast test
+			key("other", "TestX"): 2 * time.Second,
 		},
 	}
 
 	cli.createTestInfos()
 
-	assert.Len(t, cli.testInfos, 3, "Should have 3 test infos")
+	// sorted by package, unknown tests get the median of known durations (0, 2s, 10s → 2s)
+	assert.Equal(t, []types.TestInfo{
+		{TestKey: key("pkg1", "TestA"), Duration: 10 * time.Second},
+		{TestKey: key("pkg1", "TestB"), Duration: 2 * time.Second},
+		{TestKey: key("pkg2", "TestC"), Duration: 0},
+		{TestKey: key("pkg2", "TestD"), Duration: 2 * time.Second},
+	}, cli.testInfos)
+}
 
-	// Check that known duration is used
-	for _, info := range cli.testInfos {
-		if info.Package == "pkg1" && info.Function == "TestA" {
-			assert.Equal(t, 10*time.Second, info.Duration, "Should use known duration for TestA")
-		}
-		if info.Package == "pkg1" && info.Function == "TestB" {
-			assert.Equal(t, 5*time.Second, info.Duration, "Should use default duration for TestB")
-		}
-	}
+func TestDefaultDuration(t *testing.T) {
+	assert.Equal(t, fallbackDuration, (&CLI{}).defaultDuration())
+	assert.Equal(t, 3*time.Second, (&CLI{
+		DefaultDuration: 3 * time.Second,
+		testDurations:   map[types.TestKey]time.Duration{key("p", "T"): time.Second},
+	}).defaultDuration())
 }
 
 func TestSplitTests(t *testing.T) {
@@ -66,9 +76,9 @@ func TestSplitTests(t *testing.T) {
 		Nodes:     2,
 		TestFlags: []string{"-test.timeout=20m"},
 		testInfos: []types.TestInfo{
-			{Package: "pkg1", Function: "TestA", Duration: 10 * time.Second},
-			{Package: "pkg1", Function: "TestB", Duration: 5 * time.Second},
-			{Package: "pkg2", Function: "TestC", Duration: 15 * time.Second},
+			{TestKey: key("pkg1", "TestA"), Duration: 10 * time.Second},
+			{TestKey: key("pkg1", "TestB"), Duration: 5 * time.Second},
+			{TestKey: key("pkg2", "TestC"), Duration: 15 * time.Second},
 		},
 	}
 
@@ -93,10 +103,10 @@ func TestSplitTests_FunctionLevel(t *testing.T) {
 		Nodes:     2,
 		TestFlags: []string{"-test.timeout=20m"},
 		testInfos: []types.TestInfo{
-			{Package: "pkg1", Function: "TestA", Duration: 10 * time.Second},
-			{Package: "pkg1", Function: "TestB", Duration: 5 * time.Second},
-			{Package: "pkg2", Function: "TestC", Duration: 15 * time.Second},
-			{Package: "pkg2", Function: "TestD", Duration: 7 * time.Second},
+			{TestKey: key("pkg1", "TestA"), Duration: 10 * time.Second},
+			{TestKey: key("pkg1", "TestB"), Duration: 5 * time.Second},
+			{TestKey: key("pkg2", "TestC"), Duration: 15 * time.Second},
+			{TestKey: key("pkg2", "TestD"), Duration: 7 * time.Second},
 		},
 	}
 
