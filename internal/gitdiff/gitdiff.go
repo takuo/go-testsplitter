@@ -66,3 +66,16 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 	}
 	return string(out), nil
 }
+
+// Show returns the content of path (relative to the repository root, slash-separated) at rev.
+// It returns false if the file does not exist at rev.
+func Show(ctx context.Context, root, rev, path string) ([]byte, bool, error) {
+	if _, err := git(ctx, root, "cat-file", "-e", rev+":"+path); err != nil {
+		return nil, false, nil
+	}
+	out, err := git(ctx, root, "cat-file", "blob", rev+":"+path)
+	if err != nil {
+		return nil, false, err
+	}
+	return []byte(out), true, nil
+}

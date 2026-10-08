@@ -83,12 +83,12 @@ func LoadDepGraph(patterns []string) (*DepGraph, error) {
 		if p.Dir == "" {
 			continue
 		}
-		dir := realPath(p.Dir)
+		dir := RealPath(p.Dir)
 		if p.ForTest == "" {
 			g.dirs[dir] = imp
 		}
 		for _, f := range slices.Concat(p.EmbedFiles, p.TestEmbedFiles, p.XTestEmbedFiles) {
-			path := realPath(filepath.Join(p.Dir, f))
+			path := RealPath(filepath.Join(p.Dir, f))
 			if !slices.Contains(g.files[path], imp) {
 				g.files[path] = append(g.files[path], imp)
 			}
@@ -105,16 +105,17 @@ func stripTestVariant(importPath string) string {
 	return importPath
 }
 
-func realPath(path string) string {
+// RealPath returns path with symlinks resolved. For a path which does not exist (e.g. a deleted file),
+// symlinks in its nearest existing parent are resolved.
+func RealPath(path string) string {
 	if p, err := filepath.EvalSymlinks(path); err == nil {
 		return p
 	}
-	// The file may be deleted: resolve the nearest existing parent.
 	dir, base := filepath.Split(filepath.Clean(path))
 	if dir == "" || filepath.Clean(dir) == path {
 		return path
 	}
-	return filepath.Join(realPath(filepath.Clean(dir)), base)
+	return filepath.Join(RealPath(filepath.Clean(dir)), base)
 }
 
 // ChangedPackages returns import paths of packages affected by changes of files (absolute paths), sorted.
@@ -123,7 +124,7 @@ func realPath(path string) string {
 func (g *DepGraph) ChangedPackages(files []string) (packages, unmatched []string) {
 	set := make(map[string]bool)
 	for _, f := range files {
-		path := realPath(f)
+		path := RealPath(f)
 		found := false
 		for _, imp := range g.files[path] {
 			set[imp] = true
@@ -157,6 +158,16 @@ func testdataOwner(path string) string {
 		}
 	}
 	return ""
+}
+
+// MainPackages returns the import paths of the packages in the main module(s), sorted.
+func (g *DepGraph) MainPackages() []string {
+	var pkgs []string
+	for _, imp := range g.dirs {
+		pkgs = append(pkgs, imp)
+	}
+	slices.Sort(pkgs)
+	return slices.Compact(pkgs)
 }
 
 // AffectedBy returns the changed packages that the test binary of importPath depends on
