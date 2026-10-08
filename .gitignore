@@ -34,3 +34,5 @@ go.work.sum
 # rest results
 test-scripts
 test-bin
+# goreleaser
+dist/
