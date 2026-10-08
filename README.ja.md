@@ -96,7 +96,7 @@ Linux / macOS 向けのビルド済みバイナリは [Releases](https://github.
 * 変更ファイルが `--run-all-on` (デフォルトは `go.mod`, `go.sum`, `go.work`) に一致した場合は全パッケージを選択
 * import グラフに現れない依存 (パッケージ外のファイルを相対パスで読む、外部サービスなど) は検出できないため、main ブランチでは全テストの実行を推奨
 * `--dry-run` と `--plan` で、どのパッケージがなぜ選択されたかを確認可能
-* ベースのリビジョンを fetch しておく必要あり (例: `actions/checkout` の `fetch-depth: 0`)
+* ベースのリビジョンを fetch しておく必要あり。マージベースが見つからない浅いクローンでは、警告を出して `REV` と直接比較する。分岐後に `REV` 側で入った変更も含まれるため、余分なテストが選択されることがある。正確な差分を得るには、マージベースのコミット (GitHub の compare API の `merge_base_commit.sha` など) を `git fetch --depth=1 origin <SHA>` で取得して `REV` に渡す
 
 #### `--granularity symbol`
 
@@ -282,7 +282,7 @@ workflows:
 
 ### PR では影響を受けるテストだけを実行する (CircleCI)
 
-上記の `Building test binaries` ステップを以下に置き換えると、`main` と `release/*` では全テストを、それ以外のブランチでは変更の影響を受けるテストだけを実行します。CircleCI は PR のマージ先ブランチを提供しないため、GitHub API から取得します。
+上記の `Building test binaries` ステップを以下に置き換えると、`main` と `release/*` では全テストを、それ以外のブランチでは変更の影響を受けるテストだけを実行します。CircleCI は PR のマージ先ブランチを提供せず、マージベースは浅いクローンに含まれないため、どちらも GitHub API から取得します。
 
 ```yaml
       - run:
@@ -305,8 +305,19 @@ workflows:
                     | jq -r '.base.ref // empty') || BASE=""
                 fi
                 if [ -n "$BASE" ]; then
-                  git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
-                  SELECT=(--changed-since "origin/${BASE}" --granularity symbol)
+                  # PR のマージベース (浅いクローンには含まれない)
+                  MERGE_BASE=$(curl -fsSL \
+                    ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+                    "https://api.github.com/repos/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}/compare/${BASE}...${CIRCLE_SHA1}" \
+                    | jq -r '.merge_base_commit.sha // empty') || MERGE_BASE=""
+                  if [ -n "$MERGE_BASE" ]; then
+                    git fetch --depth=1 --no-tags origin "$MERGE_BASE"
+                    SELECT=(--changed-since "$MERGE_BASE" --granularity symbol)
+                  else
+                    # マージ先ブランチの先端: 分岐後にマージ先ブランチで入った変更も含まれる
+                    git fetch --depth=1 --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+                    SELECT=(--changed-since "origin/${BASE}" --granularity symbol)
+                  fi
                 else
                   echo "Base branch is unknown, running all tests"
                 fi
@@ -319,7 +330,8 @@ workflows:
 
 * 全テストを実行するには、`--run-all-on '.*'` ではなく `--changed-since` を付けない。`--run-all-on` は変更ファイルに対して評価されるため、変更がない場合 (例: `main` で `--changed-since origin/main`) はテストが 0 件になる
 * マージ先ブランチが分からない場合 (PR のないブランチ、API の失敗など) は全テストを実行
-* 比較対象はマージ先ブランチと `HEAD` のマージベースのため、PR 作成後にマージ先ブランチへ追加されたコミットは含まれない。積み重ねた PR では親 PR のブランチがマージ先になる
+* 比較対象は PR のマージベース (SHA を指定して `--depth=1` で取得) のため、PR 作成後にマージ先ブランチへ追加されたコミットは含まれない。積み重ねた PR では親 PR のブランチがマージ先になる
+* API からマージベースを取得できない場合はマージ先ブランチの先端と比較する。分岐後にマージ先ブランチで入った変更も含まれるため余分なテストが実行されることがあるが、影響を受けるテストが漏れることはない
 * プライベートリポジトリでは、リポジトリの read 権限を持つ `GITHUB_TOKEN` (CircleCI の Context など) が必要。トークンなしの API リクエストはレート制限を受ける
 * `CIRCLE_PULL_REQUEST` はブランチの最初の PR (すべての PR は `CIRCLE_PULL_REQUESTS`)
 * `curl` と `jq` の代わりに GitHub CLI を使う場合は以下のように取得する。`gh` は `cimg` イメージに含まれないためインストールが必要で、公開リポジトリでも `GH_TOKEN` が必要。`CIRCLE_PULL_REQUEST` が空の場合の判定と、失敗時に全テストを実行するための `|| BASE=""` は残す

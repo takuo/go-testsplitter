@@ -94,7 +94,7 @@ With `--changed-since REV`, only tests of packages affected by the changes since
 * If a changed file matches `--run-all-on` (by default `go.mod`, `go.sum` and `go.work`), all packages are selected
 * Dependencies not visible in the import graph (e.g. files read by relative paths outside the package, external services) are not detected. Running all tests on the main branch is recommended
 * `--dry-run` and `--plan` show which packages are selected and why
-* The base revision must be fetched, e.g. `fetch-depth: 0` with `actions/checkout`
+* The base revision must be fetched. In a shallow clone, where the merge base cannot be found, changes are compared with `REV` directly with a warning: changes on the `REV` side after the branch point are also included, and extra tests may be selected. To get exact changes, fetch the merge base commit (e.g. `merge_base_commit.sha` of the GitHub compare API) with `git fetch --depth=1 origin <SHA>` and pass it as `REV`
 
 #### `--granularity symbol`
 
@@ -280,7 +280,7 @@ workflows:
 
 ### Running only affected tests in pull requests (CircleCI)
 
-Replace the `Building test binaries` step above to run all tests on `main` and `release/*`, and only tests affected by the changes in other branches. The base branch of the pull request is fetched from the GitHub API, since CircleCI does not provide it.
+Replace the `Building test binaries` step above to run all tests on `main` and `release/*`, and only tests affected by the changes in other branches. The base branch and the merge base of the pull request are fetched from the GitHub API, since CircleCI does not provide them and the merge base is not in a shallow clone.
 
 ```yaml
       - run:
@@ -303,8 +303,19 @@ Replace the `Building test binaries` step above to run all tests on `main` and `
                     | jq -r '.base.ref // empty') || BASE=""
                 fi
                 if [ -n "$BASE" ]; then
-                  git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
-                  SELECT=(--changed-since "origin/${BASE}" --granularity symbol)
+                  # the merge base of the pull request, which is not in a shallow clone
+                  MERGE_BASE=$(curl -fsSL \
+                    ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+                    "https://api.github.com/repos/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}/compare/${BASE}...${CIRCLE_SHA1}" \
+                    | jq -r '.merge_base_commit.sha // empty') || MERGE_BASE=""
+                  if [ -n "$MERGE_BASE" ]; then
+                    git fetch --depth=1 --no-tags origin "$MERGE_BASE"
+                    SELECT=(--changed-since "$MERGE_BASE" --granularity symbol)
+                  else
+                    # the base branch tip: changes on the base branch after the branch point are also included
+                    git fetch --depth=1 --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+                    SELECT=(--changed-since "origin/${BASE}" --granularity symbol)
+                  fi
                 else
                   echo "Base branch is unknown, running all tests"
                 fi
@@ -317,7 +328,8 @@ Replace the `Building test binaries` step above to run all tests on `main` and `
 
 * To run all tests, omit `--changed-since` rather than using `--run-all-on '.*'`: `--run-all-on` matches changed files, so it selects no tests when nothing is changed (e.g. `--changed-since origin/main` on `main`)
 * If the base branch is unknown (e.g. a branch without a pull request, or an API failure), all tests run
-* Changes are compared with the merge base of the base branch and `HEAD`, so commits added to the base branch after the pull request was created are not included. For stacked pull requests, the base is the parent pull request's branch
+* Changes are compared with the merge base of the pull request (fetched by SHA with `--depth=1`), so commits added to the base branch after the pull request was created are not included. For stacked pull requests, the base is the parent pull request's branch
+* If the merge base cannot be fetched from the API, the base branch tip is used. Then changes on the base branch after the branch point are also included and extra tests may run, but no affected tests are missed
 * `GITHUB_TOKEN` (e.g. in a CircleCI context) with read access to the repository is required for private repositories. Without it, unauthenticated API requests are rate-limited
 * `CIRCLE_PULL_REQUEST` is the first pull request of the branch (all of them are in `CIRCLE_PULL_REQUESTS`)
 * With the GitHub CLI instead of `curl` and `jq`, get the base branch as follows. `gh` is not included in `cimg` images, and it requires `GH_TOKEN` even for public repositories. Keep the `CIRCLE_PULL_REQUEST` check, and `|| BASE=""` to run all tests when it fails
