@@ -162,3 +162,34 @@ func TestEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, reports)
 }
+
+// TestBuildCollidingNames builds packages whose `go test -c` binary names collide (a/x and b/x).
+func TestBuildCollidingNames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	binary := buildBinary(t)
+	work := t.TempDir()
+	files := map[string]string{
+		"go.mod":        "module example.com/m/v2\n\ngo 1.21\n",
+		"root_test.go":  "package m\nimport \"testing\"\nfunc TestRoot(t *testing.T) {}\n",
+		"a/x/x_test.go": "package x\nimport \"testing\"\nfunc TestA(t *testing.T) {}\n",
+		"b/x/x_test.go": "package x\nimport \"testing\"\nfunc TestB(t *testing.T) {}\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(work, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
+
+	runSplitter(t, binary, work, "", "-s", "-n", "1")
+
+	for bin, test := range map[string]string{"a.x.test": "TestA", "b.x.test": "TestB", "..test": "TestRoot"} {
+		out, err := exec.Command(filepath.Join(work, "test-bin", bin), "-test.list", ".").CombinedOutput()
+		require.NoError(t, err, "%s: %s", bin, out)
+		assert.Equal(t, test+"\n", string(out), bin)
+	}
+	entries, err := os.ReadDir(filepath.Join(work, "test-bin"))
+	require.NoError(t, err)
+	assert.Len(t, entries, 3, "no temporary directories are left")
+}

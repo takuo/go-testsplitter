@@ -11,7 +11,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/sourcegraph/conc/pool"
 
 	"github.com/takuo/go-testsplitter/internal/parser"
 	"github.com/takuo/go-testsplitter/internal/scanner"
@@ -47,7 +45,7 @@ type CLI struct {
 	TestFlags       []string      `arg:"" help:"Flags to pass to the test binary after --" optional:""`
 
 	BinariesDir      string `short:"p" long:"binaries-dir" default:"./test-bin" help:"Directory to output or containing test binaries"`
-	BuildConcurrency int    `short:"b" long:"build-concurrency" default:"4" help:"Concurrency for building test binaries"`
+	BuildConcurrency int    `short:"b" long:"build-concurrency" default:"4" help:"Number of packages built in parallel (go test -p)"`
 	DisableBuild     bool   `short:"d" long:"disable-build" default:"false" help:"Disable building test binaries (use pre-built binaries by other way)"`
 
 	Version kong.VersionFlag `short:"v" long:"version" help:"Print version and exit"`
@@ -366,40 +364,4 @@ func writeScript(filename string, tmpl *template.Template, data types.TemplateDa
 		return fmt.Errorf("failed to make %s executable: %w", filename, err)
 	}
 	return nil
-}
-
-// binaryName returns the test binary name for the package directory.
-// e.g. api/service/foo → api.service.foo.test
-func binaryName(dir string) string {
-	return strings.ReplaceAll(dir, "/", ".") + ".test"
-}
-
-// buildTestBinaries builds test binaries for all target packages into the binaries directory.
-// It stops building remaining packages on the first failure.
-func (c *CLI) buildTestBinaries(ctx context.Context) error {
-	log.Printf("Building test binaries for %d packages with concurrency %d.", len(c.packages), c.BuildConcurrency)
-
-	outputDir, err := filepath.Abs(c.BinariesDir)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute output path: %w", err)
-	}
-
-	p := pool.New().WithMaxGoroutines(c.BuildConcurrency).WithContext(ctx).WithCancelOnError().WithFirstError()
-	for _, pkg := range c.packages {
-		p.Go(func(ctx context.Context) error {
-			output := filepath.Join(outputDir, binaryName(pkg.Dir))
-			log.Printf("Building %s as %s...", pkg.Dir, output)
-			cmd := exec.CommandContext(ctx, "go", "test", "-c", "-o", output, ".")
-			cmd.Dir = pkg.Dir
-			out, err := cmd.CombinedOutput()
-			if len(out) > 0 {
-				log.Printf("go test -c %s:\n%s", pkg.Dir, out)
-			}
-			if err != nil {
-				return fmt.Errorf("build %s: %w", pkg.Dir, err)
-			}
-			return nil
-		})
-	}
-	return p.Wait()
 }
