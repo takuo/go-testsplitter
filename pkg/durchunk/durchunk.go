@@ -1,18 +1,30 @@
-// Package durchunk provides functions to split a map of key-durations into balanced chunks.
+// Package durchunk provides functions to split key-durations into balanced chunks.
 package durchunk
 
 import (
+	"cmp"
 	"iter"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"time"
 )
 
 // DefaultSeed is the random seed used when WithSeed is not given.
 const DefaultSeed uint64 = 1
 
+// DefaultIterations is the number of simulated annealing iterations used when WithIterations is not given.
+const DefaultIterations = 50000
+
+// Chunk chunk after balanced split
+type Chunk[K comparable] struct {
+	Keys  []K           `json:"keys"`
+	Total time.Duration `json:"total"`
+}
+
 type options struct {
-	seed uint64
+	seed       uint64
+	iterations int
 }
 
 // Option configures SplitBalanced.
@@ -23,156 +35,156 @@ func WithSeed(seed uint64) Option {
 	return func(o *options) { o.seed = seed }
 }
 
-// Chunk chunk after balanced split
-type Chunk struct {
-	Keys  []string      `json:"keys"`
-	Total time.Duration `json:"total_seconds"`
+// WithIterations sets the number of simulated annealing iterations. 0 disables annealing.
+func WithIterations(n int) Option {
+	return func(o *options) { o.iterations = n }
 }
 
-type entry struct {
-	Key string
-	Dur time.Duration
+type entry[K comparable] struct {
+	key   K
+	dur   time.Duration
+	order int // position in the input sequence
 }
 
-// SplitBalanced は map[string]time.Duration を指定したチャンク数に分割します。
-// - 合計時間を均等化
-// - 要素数に制約なし（最低1個以上）
-// - 同じ入力順序とシードなら常に同じ結果
-// - chunkCount < 1 の場合は nil を返す
-func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int, opts ...Option) []Chunk {
+// SplitBalanced splits key-durations into chunkCount chunks so that the largest chunk total
+// (the makespan) is minimized, and the chunk totals are as even as possible.
+//
+// The result is deterministic for the same input order and seed. Keys in each chunk keep the input order.
+// It returns nil if chunkCount < 1.
+func SplitBalanced[K comparable](data iter.Seq2[K, time.Duration], chunkCount int, opts ...Option) []Chunk[K] {
 	if chunkCount < 1 {
 		return nil
 	}
-	o := options{seed: DefaultSeed}
+	o := options{seed: DefaultSeed, iterations: DefaultIterations}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	rng := rand.New(rand.NewPCG(o.seed, o.seed))
 
-	entries := []entry{}
-	globalDurMap := make(map[string]time.Duration)
-	for k, v := range data {
-		globalDurMap[k] = v
-		entries = append(entries, entry{Key: k, Dur: v})
+	var entries []entry[K]
+	for k, d := range data {
+		entries = append(entries, entry[K]{key: k, dur: max(d, 0), order: len(entries)})
 	}
 
-	chunks := greedyPartition(entries, chunkCount, rng)
-	chunks = simulatedAnnealing(chunks, 50000, 1000.0, 0.01, globalDurMap, rng)
+	assign, sums := greedyPartition(entries, chunkCount)
+	if chunkCount > 1 && len(entries) > 1 && o.iterations > 0 {
+		rng := rand.New(rand.NewPCG(o.seed, o.seed))
+		assign, sums = simulatedAnnealing(entries, assign, sums, o.iterations, rng)
+	}
 
+	chunks := make([]Chunk[K], chunkCount)
+	for i, e := range entries {
+		c := assign[i]
+		chunks[c].Keys = append(chunks[c].Keys, e.key)
+	}
 	for i := range chunks {
-		var total time.Duration
-		for _, k := range chunks[i].Keys {
-			total += globalDurMap[k]
-		}
-		chunks[i].Total = total
+		chunks[i].Total = sums[i]
 	}
-
 	return chunks
 }
 
-// --------------------
-// 内部関数
-// --------------------
-func greedyPartition(entries []entry, m int, rng *rand.Rand) []Chunk {
-	rng.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
-
-	chunks := make([]Chunk, m)
-	sums := make([]time.Duration, m)
+// greedyPartition assigns entries using the LPT (Longest Processing Time first) rule.
+// entries is sorted in place by input order on return.
+func greedyPartition[K comparable](entries []entry[K], m int) (assign []int, sums []time.Duration) {
+	slices.SortStableFunc(entries, func(a, b entry[K]) int {
+		return cmp.Compare(b.dur, a.dur)
+	})
+	byOrder := make([]int, len(entries))
+	sums = make([]time.Duration, m)
+	counts := make([]int, m)
 	for _, e := range entries {
 		best := 0
 		for i := 1; i < m; i++ {
-			if sums[i] < sums[best] {
+			// prefer fewer keys on ties so that zero-duration keys are spread too
+			if sums[i] < sums[best] || (sums[i] == sums[best] && counts[i] < counts[best]) {
 				best = i
 			}
 		}
-		chunks[best].Keys = append(chunks[best].Keys, e.Key)
-		sums[best] += e.Dur
-		chunks[best].Total = sums[best]
+		byOrder[e.order] = best
+		sums[best] += e.dur
+		counts[best]++
 	}
-	return chunks
+	slices.SortFunc(entries, func(a, b entry[K]) int { return cmp.Compare(a.order, b.order) })
+	return byOrder, sums
 }
 
-func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float64, durMap map[string]time.Duration, rng *rand.Rand) []Chunk {
-	best := copyChunks(chunks)
-	bestScore := score(best)
-	current := copyChunks(chunks)
-	currentScore := bestScore
+// simulatedAnnealing improves the assignment by moving or swapping entries between chunks.
+// Only the touched chunk sums are updated on each step.
+func simulatedAnnealing[K comparable](entries []entry[K], assign []int, sums []time.Duration, iterations int, rng *rand.Rand) ([]int, []time.Duration) {
+	m := len(sums)
+	n := len(entries)
+
+	var total time.Duration
+	for _, s := range sums {
+		total += s
+	}
+	if total == 0 {
+		return assign, sums
+	}
+	// Temperatures are relative to the mean entry duration.
+	mean := float64(total) / float64(n)
+	tempStart, tempEnd := mean, mean*1e-4
+
+	cur := slices.Clone(assign)
+	curSums := slices.Clone(sums)
+	curScore := score(curSums)
+	best := slices.Clone(cur)
+	bestSums := slices.Clone(curSums)
+	bestScore := curScore
 
 	for i := range iterations {
 		t := tempStart * math.Pow(tempEnd/tempStart, float64(i)/float64(iterations))
-		next := copyChunks(current)
 
-		if rng.Float64() < 0.5 {
-			from := rng.IntN(len(next))
-			if len(next[from].Keys) == 0 {
-				continue
-			}
-			to := rng.IntN(len(next))
-			if from == to {
-				continue
-			}
-			idx := rng.IntN(len(next[from].Keys))
-			val := next[from].Keys[idx]
-			next[from].Keys = append(next[from].Keys[:idx], next[from].Keys[idx+1:]...)
-			next[to].Keys = append(next[to].Keys, val)
+		a := rng.IntN(n)
+		ca := cur[a]
+		var b, cb int
+		swap := rng.IntN(2) == 0
+		if swap {
+			b = rng.IntN(n)
+			cb = cur[b]
 		} else {
-			a := rng.IntN(len(next))
-			b := rng.IntN(len(next))
-			if a == b || len(next[a].Keys) == 0 || len(next[b].Keys) == 0 {
-				continue
-			}
-			ia := rng.IntN(len(next[a].Keys))
-			ib := rng.IntN(len(next[b].Keys))
-			next[a].Keys[ia], next[b].Keys[ib] = next[b].Keys[ib], next[a].Keys[ia]
+			cb = rng.IntN(m)
+		}
+		if ca == cb {
+			continue
 		}
 
-		for i := range next {
-			var sum time.Duration
-			for _, k := range next[i].Keys {
-				sum += durMap[k]
-			}
-			next[i].Total = sum
+		// apply
+		curSums[ca] -= entries[a].dur
+		curSums[cb] += entries[a].dur
+		cur[a] = cb
+		if swap {
+			curSums[cb] -= entries[b].dur
+			curSums[ca] += entries[b].dur
+			cur[b] = ca
 		}
 
-		nextScore := score(next)
-		delta := nextScore - currentScore
-		if delta < 0 || rng.Float64() < math.Exp(-delta/t) {
-			current = next
-			currentScore = nextScore
+		nextScore := score(curSums)
+		delta := nextScore - curScore
+		if delta <= 0 || rng.Float64() < math.Exp(-delta/t) {
+			curScore = nextScore
+			if curScore < bestScore {
+				bestScore = curScore
+				copy(best, cur)
+				copy(bestSums, curSums)
+			}
+			continue
 		}
-		if currentScore < bestScore {
-			best = copyChunks(current)
-			bestScore = currentScore
+
+		// revert
+		if swap {
+			curSums[ca] -= entries[b].dur
+			curSums[cb] += entries[b].dur
+			cur[b] = cb
 		}
+		curSums[cb] -= entries[a].dur
+		curSums[ca] += entries[a].dur
+		cur[a] = ca
 	}
-
-	return best
+	return best, bestSums
 }
 
-// score returns the spread (max - min) of chunk totals in seconds.
-func score(chunks []Chunk) float64 {
-	min, max := chunks[0].Total.Seconds(), chunks[0].Total.Seconds()
-	for _, c := range chunks[1:] {
-		sec := c.Total.Seconds()
-		if sec < min {
-			min = sec
-		}
-		if sec > max {
-			max = sec
-		}
-	}
-	return max - min
-}
-
-func copyChunks(chunks []Chunk) []Chunk {
-	newChunks := make([]Chunk, len(chunks))
-	for i := range chunks {
-		keys := make([]string, len(chunks[i].Keys))
-		copy(keys, chunks[i].Keys)
-		newChunks[i] = Chunk{
-			Keys:  keys,
-			Total: chunks[i].Total,
-		}
-	}
-	return newChunks
+// score is primarily the makespan (max chunk total), with the spread (max - min) as a tie-breaker.
+func score(sums []time.Duration) float64 {
+	lo, hi := slices.Min(sums), slices.Max(sums)
+	return float64(hi) + float64(hi-lo)/float64(len(sums))
 }

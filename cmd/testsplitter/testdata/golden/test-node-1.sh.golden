@@ -3,9 +3,9 @@
 set -euo pipefail
 
 LINES=$(cat <<'EOF'
-example/pkg2 '^(TestReverseEmpty|TestToUpper)$'
-example/pkg3 '^(TestAbsPositive|TestMax|TestAbs|TestMin)$'
-example/pkg1 '^(TestMultiply)$'
+example/pkg1 '^(TestAdd|TestMultiply|TestMultiplyZero)$'
+example/pkg2 '^(TestReverse|TestReverseEmpty|TestToUpper)$'
+example/pkg3 '^(TestAbsPositive)$'
 EOF
 )
 
