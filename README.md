@@ -167,9 +167,10 @@ jobs:
       - restore_cache:
           name: Restoring previous test results
           keys:
-            - &test-results-cache v1-test-results-{{ .Branch }}-{{ .Revision }}
+            - &test-results-cache v1-test-results-{{ .Branch }}-{{ epoch }}
             - v1-test-results-{{ .Branch }}-
-            - v1-test-results
+            - v1-test-results-main-
+            - v1-test-results-
       - run:
           name: Building test binaries
           command: |
@@ -212,20 +213,45 @@ jobs:
           no_output_timeout: 10m
       - store_artifacts:
           path: test-reports
+          when: always
       - store_test_results:
           path: test-reports
+          when: always
       - persist_to_workspace:
           root: /home/circleci/project
           name: Saving test json output
           paths:
             - test-json
+          when: always
   save-test-result:
     resource_class: small
     docker:
       - image: cimg/base:current
     steps:
+      # previous results
+      - restore_cache:
+          name: Restoring previous test results
+          keys:
+            - v1-test-results-{{ .Branch }}-
+            - v1-test-results-main-
+            - v1-test-results-
+      # results of this run (test-json/test-[NODE INDEX].jsonl)
       - attach_workspace:
           at: /home/circleci/project
+      - run:
+          name: Archiving test results of this run
+          working_directory: /home/circleci/project/test-json
+          command: |
+            run="runs/$(date +%s)-${CIRCLE_WORKFLOW_ID}"
+            mkdir -p "$run"
+            for f in test-*.jsonl; do
+              [ -e "$f" ] || continue
+              # drop output events, which are not needed for splitting
+              grep -v '"Action":"output"' "$f" > "$run/$f" || true
+              rm "$f"
+            done
+            # keep the latest 20 runs
+            ls -1d runs/*/ | sort -r | tail -n +21 | xargs -r rm -rf
       - save_cache:
           name: Saving JSON Test Reports
           key: *test-results-cache
@@ -245,6 +271,62 @@ workflows:
               - success
               - failed
 ```
+
+* Previous test results are restored only in the `build` job, where `testsplitter` reads them. The `test` job starts with an empty `test-json` and persists only the results of its node (`test-[NODE INDEX].jsonl`), so files of parallel nodes do not collide in the workspace
+* The `save-test-result` job adds the results of this run to the previous results under `test-json/runs/`, instead of replacing them. Otherwise, when only some tests run (e.g. `--changed-since`), the results of the other tests are lost. `testsplitter` reads `-j` recursively and uses the newest result of each test
+* The cache keys contain `{{ epoch }}` so that a new cache is saved every time, even when re-running a workflow of the same revision. New branches fall back to the results of `main`
+* `when: always` saves test reports and results even if tests fail
+* Use `--max-age` to ignore old results, and adjust the number of runs kept (`tail -n +21`)
+
+### Running only affected tests in pull requests (CircleCI)
+
+Replace the `Building test binaries` step above to run all tests on `main` and `release/*`, and only tests affected by the changes in other branches. The base branch of the pull request is fetched from the GitHub API, since CircleCI does not provide it.
+
+```yaml
+      - run:
+          name: Building test binaries
+          command: |
+            export GOGC=off CGO_ENABLED=0
+            go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+
+            SELECT=()
+            case "$CIRCLE_BRANCH" in
+              main|release/*)
+                ;; # run all tests
+              *)
+                # the base branch of the pull request (empty on failure, then all tests run)
+                BASE=""
+                if [ -n "${CIRCLE_PULL_REQUEST:-}" ]; then
+                  BASE=$(curl -fsSL \
+                    ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+                    "https://api.github.com/repos/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}/pulls/${CIRCLE_PULL_REQUEST##*/}" \
+                    | jq -r '.base.ref // empty') || BASE=""
+                fi
+                if [ -n "$BASE" ]; then
+                  git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+                  SELECT=(--changed-since "origin/${BASE}" --granularity symbol)
+                else
+                  echo "Base branch is unknown, running all tests"
+                fi
+                ;;
+            esac
+
+            testsplitter -n << pipeline.parameters.test-parallelism >> -s -b 7 -c 4 -m 20 \
+              "${SELECT[@]}" -- -test.timeout=10m
+```
+
+* To run all tests, omit `--changed-since` rather than using `--run-all-on '.*'`: `--run-all-on` matches changed files, so it selects no tests when nothing is changed (e.g. `--changed-since origin/main` on `main`)
+* If the base branch is unknown (e.g. a branch without a pull request, or an API failure), all tests run
+* Changes are compared with the merge base of the base branch and `HEAD`, so commits added to the base branch after the pull request was created are not included. For stacked pull requests, the base is the parent pull request's branch
+* `GITHUB_TOKEN` (e.g. in a CircleCI context) with read access to the repository is required for private repositories. Without it, unauthenticated API requests are rate-limited
+* `CIRCLE_PULL_REQUEST` is the first pull request of the branch (all of them are in `CIRCLE_PULL_REQUESTS`)
+* With the GitHub CLI instead of `curl` and `jq`, get the base branch as follows. `gh` is not included in `cimg` images, and it requires `GH_TOKEN` even for public repositories. Keep the `CIRCLE_PULL_REQUEST` check, and `|| BASE=""` to run all tests when it fails
+  ```bash
+  BASE=""
+  if [ -n "${CIRCLE_PULL_REQUEST:-}" ]; then
+    BASE=$(gh pr view "$CIRCLE_PULL_REQUEST" --json baseRefName -q .baseRefName) || BASE=""
+  fi
+  ```
 
 ## Development
 

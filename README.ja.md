@@ -169,9 +169,10 @@ jobs:
       - restore_cache:
           name: Restoring previous test results
           keys:
-            - &test-results-cache v1-test-results-{{ .Branch }}-{{ .Revision }}
+            - &test-results-cache v1-test-results-{{ .Branch }}-{{ epoch }}
             - v1-test-results-{{ .Branch }}-
-            - v1-test-results
+            - v1-test-results-main-
+            - v1-test-results-
       - run:
           name: Building test binaries
           command: |
@@ -214,20 +215,45 @@ jobs:
           no_output_timeout: 10m
       - store_artifacts:
           path: test-reports
+          when: always
       - store_test_results:
           path: test-reports
+          when: always
       - persist_to_workspace:
           root: /home/circleci/project
           name: Saving test result
           paths:
             - test-json
+          when: always
   save-test-result:
     resource_class: small
     docker:
       - image: cimg/base:current
     steps:
+      # previous results
+      - restore_cache:
+          name: Restoring previous test results
+          keys:
+            - v1-test-results-{{ .Branch }}-
+            - v1-test-results-main-
+            - v1-test-results-
+      # results of this run (test-json/test-[NODE INDEX].jsonl)
       - attach_workspace:
           at: /home/circleci/project
+      - run:
+          name: Archiving test results of this run
+          working_directory: /home/circleci/project/test-json
+          command: |
+            run="runs/$(date +%s)-${CIRCLE_WORKFLOW_ID}"
+            mkdir -p "$run"
+            for f in test-*.jsonl; do
+              [ -e "$f" ] || continue
+              # drop output events, which are not needed for splitting
+              grep -v '"Action":"output"' "$f" > "$run/$f" || true
+              rm "$f"
+            done
+            # keep the latest 20 runs
+            ls -1d runs/*/ | sort -r | tail -n +21 | xargs -r rm -rf
       - save_cache:
           name: Saving Test Result JSON
           key: *test-results-cache
@@ -247,6 +273,62 @@ workflows:
               - success
               - failed
 ```
+
+* 過去のテスト結果は、`testsplitter` が読む `build` ジョブでのみ復元する。`test` ジョブは空の `test-json` に自分のノードの結果 (`test-[NODE INDEX].jsonl`) だけを書いて保存するため、並列ノード間で workspace のファイルが衝突しない
+* `save-test-result` ジョブは、今回の結果を過去の結果に置き換えるのではなく `test-json/runs/` 以下に追加して保存する。置き換えると、一部のテストだけを実行した場合 (`--changed-since` など) に他のテストの結果が失われる。`testsplitter` は `-j` 以下を再帰的に読み、テストごとに最新の結果を使う
+* 同じリビジョンのワークフローを再実行しても新しいキャッシュが保存されるよう、キャッシュキーに `{{ epoch }}` を含める。新しいブランチは `main` の結果を引き継ぐ
+* `when: always` で、テストが失敗してもレポートと結果を保存する
+* 古い結果を無視するには `--max-age` を使う。保持する回数は `tail -n +21` で調整
+
+### PR では影響を受けるテストだけを実行する (CircleCI)
+
+上記の `Building test binaries` ステップを以下に置き換えると、`main` と `release/*` では全テストを、それ以外のブランチでは変更の影響を受けるテストだけを実行します。CircleCI は PR のマージ先ブランチを提供しないため、GitHub API から取得します。
+
+```yaml
+      - run:
+          name: Building test binaries
+          command: |
+            export GOGC=off CGO_ENABLED=0
+            go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+
+            SELECT=()
+            case "$CIRCLE_BRANCH" in
+              main|release/*)
+                ;; # 全テストを実行
+              *)
+                # PR のマージ先ブランチを取得 (失敗したら空のままにして全テストを実行)
+                BASE=""
+                if [ -n "${CIRCLE_PULL_REQUEST:-}" ]; then
+                  BASE=$(curl -fsSL \
+                    ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+                    "https://api.github.com/repos/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}/pulls/${CIRCLE_PULL_REQUEST##*/}" \
+                    | jq -r '.base.ref // empty') || BASE=""
+                fi
+                if [ -n "$BASE" ]; then
+                  git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+                  SELECT=(--changed-since "origin/${BASE}" --granularity symbol)
+                else
+                  echo "Base branch is unknown, running all tests"
+                fi
+                ;;
+            esac
+
+            testsplitter -n << pipeline.parameters.test-parallelism >> -s -b 7 -c 4 -m 20 \
+              "${SELECT[@]}" -- -test.timeout=10m
+```
+
+* 全テストを実行するには、`--run-all-on '.*'` ではなく `--changed-since` を付けない。`--run-all-on` は変更ファイルに対して評価されるため、変更がない場合 (例: `main` で `--changed-since origin/main`) はテストが 0 件になる
+* マージ先ブランチが分からない場合 (PR のないブランチ、API の失敗など) は全テストを実行
+* 比較対象はマージ先ブランチと `HEAD` のマージベースのため、PR 作成後にマージ先ブランチへ追加されたコミットは含まれない。積み重ねた PR では親 PR のブランチがマージ先になる
+* プライベートリポジトリでは、リポジトリの read 権限を持つ `GITHUB_TOKEN` (CircleCI の Context など) が必要。トークンなしの API リクエストはレート制限を受ける
+* `CIRCLE_PULL_REQUEST` はブランチの最初の PR (すべての PR は `CIRCLE_PULL_REQUESTS`)
+* `curl` と `jq` の代わりに GitHub CLI を使う場合は以下のように取得する。`gh` は `cimg` イメージに含まれないためインストールが必要で、公開リポジトリでも `GH_TOKEN` が必要。`CIRCLE_PULL_REQUEST` が空の場合の判定と、失敗時に全テストを実行するための `|| BASE=""` は残す
+  ```bash
+  BASE=""
+  if [ -n "${CIRCLE_PULL_REQUEST:-}" ]; then
+    BASE=$(gh pr view "$CIRCLE_PULL_REQUEST" --json baseRefName -q .baseRefName) || BASE=""
+  fi
+  ```
 
 ## 開発
 
