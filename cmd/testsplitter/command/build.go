@@ -14,6 +14,10 @@ import (
 	"github.com/takuo/go-testsplitter/internal/scanner"
 )
 
+// test2jsonName is the file name of the test2json binary built into the binaries directory,
+// so that test nodes don't need the Go toolchain.
+const test2jsonName = "test2json"
+
 // binaryEscaper escapes characters in a path element so that elements can be joined with ".".
 var binaryEscaper = strings.NewReplacer("%", "%25", ".", "%2E")
 
@@ -88,7 +92,19 @@ func (c *CLI) buildTestBinaries(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := buildTest2JSON(ctx, outputDir); err != nil {
+		return err
+	}
 	slog.Info("Built test binaries", "dir", outputDir)
+	return nil
+}
+
+// buildTest2JSON builds cmd/test2json of the current Go toolchain into dir.
+func buildTest2JSON(ctx context.Context, dir string) error {
+	out, err := exec.CommandContext(ctx, "go", "build", "-o", filepath.Join(dir, test2jsonName), "cmd/test2json").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("go build cmd/test2json: %w\n%s", err, out)
+	}
 	return nil
 }
 

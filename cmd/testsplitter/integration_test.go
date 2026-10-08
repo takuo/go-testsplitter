@@ -170,10 +170,16 @@ func TestEndToEnd(t *testing.T) {
 
 	runSplitter(t, binary, work, "", "-s", "-n", strconv.Itoa(nodes), "-c", "2", "-m", "1", "--", "-test.count=1")
 
+	// The scripts must not need the Go toolchain: put a failing "go" first in PATH
+	assert.FileExists(t, filepath.Join(work, "test-bin", "test2json"))
+	noGo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(noGo, "go"), []byte("#!/bin/sh\necho go is not available >&2\nexit 1\n"), 0o755))
+
 	for i := range nodes {
 		script := filepath.Join(work, "test-scripts", "test-node-"+strconv.Itoa(i)+".sh")
 		cmd := exec.Command("bash", script)
 		cmd.Dir = work
+		cmd.Env = append(os.Environ(), "PATH="+noGo+string(os.PathListSeparator)+os.Getenv("PATH"))
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "%s failed: %s", script, out)
 	}
@@ -234,5 +240,5 @@ func TestBuildCollidingNames(t *testing.T) {
 	}
 	entries, err := os.ReadDir(filepath.Join(work, "test-bin"))
 	require.NoError(t, err)
-	assert.Len(t, entries, 3, "no temporary directories are left")
+	assert.Len(t, entries, 4, "test binaries and test2json, no temporary directories are left")
 }

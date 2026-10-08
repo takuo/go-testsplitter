@@ -15,6 +15,11 @@ run_test() {
   local json="${JSON_DIR}/test-0-${count}.jsonl"
   local report="${REPORT_DIR}/junit-0-${count}.xml"
   local flags=('-test.timeout=20m' '-test.v' )
+  # Use test2json built by testsplitter if available, so that the Go toolchain is not required
+  local test2json=(go tool test2json)
+  if [[ -x "${BINARIES_DIR}/test2json" ]]; then
+    test2json=("${BINARIES_DIR}/test2json")
+  fi
 
   echo "[${count}] ${pkg}: -test.run ${pattern}"
   cd "$pkg" && gotestsum -f standard-verbose \
@@ -24,7 +29,7 @@ run_test() {
     --junitfile "$report" \
     --junitfile-testsuite-name relative \
     --junitfile-testcase-classname relative \
-    --raw-command -- go tool test2json -t -p "$pkg" "$bin" "${flags[@]}" -test.v=test2json -test.run "$pattern"
+    --raw-command -- "${test2json[@]}" -t -p "$pkg" "$bin" "${flags[@]}" -test.v=test2json -test.run "$pattern"
 }
 export -f run_test
 
