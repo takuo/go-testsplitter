@@ -69,6 +69,7 @@ type CLI struct {
 	testFunctions   map[string][]string             `kong:"-"`
 	now             func() time.Time                `kong:"-"`
 	testDurations   map[types.TestKey]time.Duration `kong:"-"`
+	overheads       map[string]time.Duration        `kong:"-"`
 	defaultDuration time.Duration                   `kong:"-"`
 	testInfos       []types.TestInfo                `kong:"-"`
 	nodeTests       []*types.NodeTest               `kong:"-"`
@@ -231,7 +232,9 @@ func (c *CLI) loadTestDurations() error {
 	var files int
 
 	tests := make(map[types.TestKey]parser.Result)
+	overheads := make(map[string][]time.Duration)
 	c.testDurations = make(map[types.TestKey]time.Duration)
+	c.overheads = make(map[string]time.Duration)
 
 	var since time.Time
 	if c.MaxAge > 0 {
@@ -276,13 +279,33 @@ func (c *CLI) loadTestDurations() error {
 				tests[k] = r
 			}
 		}
+		for pkg, samples := range results.Overheads {
+			for _, r := range samples {
+				if fresh(r) {
+					overheads[pkg] = append(overheads[pkg], r.Duration)
+				}
+			}
+		}
 		return nil
 	})
 	for k, r := range tests {
 		c.testDurations[k] = r.Duration
 	}
+	for pkg, samples := range overheads {
+		c.overheads[pkg] = median(samples)
+	}
 	slog.Info("Loaded test durations", "tests", len(c.testDurations), "files", files, "dir", c.JSONDir)
+	slog.Debug("Estimated package overheads", "packages", len(c.overheads))
 	return err
+}
+
+// median returns the median of durations. It sorts durations in place.
+func median(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	slices.Sort(durations)
+	return durations[len(durations)/2]
 }
 
 func parseJSONFile(path string) (*parser.Results, error) {
@@ -302,12 +325,7 @@ func (c *CLI) estimateDefaultDuration() time.Duration {
 	if len(c.testDurations) == 0 {
 		return fallbackDuration
 	}
-	durations := make([]time.Duration, 0, len(c.testDurations))
-	for _, d := range c.testDurations {
-		durations = append(durations, d)
-	}
-	slices.Sort(durations)
-	return durations[len(durations)/2]
+	return median(slices.Collect(maps.Values(c.testDurations)))
 }
 
 func (c *CLI) createTestInfos() {
@@ -331,15 +349,14 @@ func (c *CLI) createTestInfos() {
 	}
 }
 
+// splitTests splits tests across nodes. The estimated overhead of a package is added once to
+// each node running the package, which favors keeping tests of a costly package together.
 func (c *CLI) splitTests() {
-	data := func(yield func(types.TestKey, time.Duration) bool) {
-		for _, test := range c.testInfos {
-			if !yield(test.TestKey, test.Duration) {
-				return
-			}
-		}
+	items := make([]durchunk.Item[types.TestKey], 0, len(c.testInfos))
+	for _, test := range c.testInfos {
+		items = append(items, durchunk.Item[types.TestKey]{Key: test.TestKey, Duration: test.Duration, Group: test.Package})
 	}
-	chunks := durchunk.SplitBalanced(data, c.Nodes, durchunk.WithSeed(c.Seed))
+	chunks := durchunk.SplitBalancedItems(items, c.Nodes, c.overhead, durchunk.WithSeed(c.Seed))
 
 	c.nodeTests = make([]*types.NodeTest, 0, len(chunks))
 	for i, chunk := range chunks {
@@ -358,26 +375,26 @@ func (c *CLI) splitTests() {
 	}
 }
 
+// overhead returns the estimated per-process overhead of the package.
+func (c *CLI) overhead(pkg string) time.Duration {
+	return c.overheads[pkg]
+}
+
 // testLines returns test process invocations of the node, longest first so that
 // long processes do not start last when running in parallel.
 func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
 	var lines []types.TestLine
 	for _, pkg := range nt.Packages {
-		funcs := nt.Funcs[pkg]
-		size := c.MaxFunctions
-		if size <= 0 {
-			size = len(funcs)
-		}
-		for chunk := range slices.Chunk(funcs, size) {
-			var estimated time.Duration
-			for _, fn := range chunk {
+		for _, funcs := range c.groupFunctions(pkg, nt.Funcs[pkg]) {
+			estimated := c.overhead(pkg)
+			for _, fn := range funcs {
 				estimated += c.testDuration(types.TestKey{Package: pkg, Function: fn})
 			}
 			lines = append(lines, types.TestLine{
 				Package:     pkg,
 				Binary:      binaryName(pkg),
-				TestPattern: "^(" + strings.Join(chunk, "|") + ")$",
-				Functions:   chunk,
+				TestPattern: "^(" + strings.Join(funcs, "|") + ")$",
+				Functions:   funcs,
 				Estimated:   estimated,
 			})
 		}
@@ -387,6 +404,40 @@ func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
 		lines[i].Index = i + 1
 	}
 	return lines
+}
+
+// groupFunctions splits functions of a package into ceil(n / MaxFunctions) processes
+// with balanced durations (LPT with capacity). Functions in each process are sorted by name.
+func (c *CLI) groupFunctions(pkg string, funcs []string) [][]string {
+	if c.MaxFunctions <= 0 || len(funcs) <= c.MaxFunctions {
+		return [][]string{funcs}
+	}
+	type fnDur struct {
+		name string
+		dur  time.Duration
+	}
+	sorted := make([]fnDur, 0, len(funcs))
+	for _, fn := range funcs {
+		sorted = append(sorted, fnDur{fn, c.testDuration(types.TestKey{Package: pkg, Function: fn})})
+	}
+	slices.SortStableFunc(sorted, func(a, b fnDur) int { return cmp.Compare(b.dur, a.dur) })
+
+	groups := make([][]string, (len(funcs)+c.MaxFunctions-1)/c.MaxFunctions)
+	sums := make([]time.Duration, len(groups))
+	for _, f := range sorted {
+		best := -1
+		for i := range groups {
+			if len(groups[i]) < c.MaxFunctions && (best < 0 || sums[i] < sums[best]) {
+				best = i
+			}
+		}
+		groups[best] = append(groups[best], f.name)
+		sums[best] += f.dur
+	}
+	for _, g := range groups {
+		slices.Sort(g)
+	}
+	return groups
 }
 
 // testDuration returns the estimated duration of the test.

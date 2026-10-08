@@ -22,16 +22,21 @@ type Plan struct {
 
 // PlanNode is the tests assigned to a node.
 type PlanNode struct {
-	Index            int           `json:"index"`
+	Index int `json:"index"`
+	// EstimatedSeconds is the sum of the estimated durations of the processes.
 	EstimatedSeconds float64       `json:"estimated_seconds"`
 	Processes        []PlanProcess `json:"processes"`
 }
 
-// PlanProcess is a test process invocation in a node.
+// PlanProcess is a test process invocation in a node, in execution order (longest first).
 type PlanProcess struct {
-	Package     string     `json:"package"`
-	TestPattern string     `json:"test_pattern"`
-	Tests       []PlanTest `json:"tests"`
+	Package     string `json:"package"`
+	Binary      string `json:"binary"`
+	TestPattern string `json:"test_pattern"`
+	// EstimatedSeconds is the sum of the test durations plus the package overhead.
+	EstimatedSeconds float64    `json:"estimated_seconds"`
+	OverheadSeconds  float64    `json:"overhead_seconds"`
+	Tests            []PlanTest `json:"tests"`
 }
 
 // PlanTest is a test function with its estimated duration.
@@ -58,16 +63,19 @@ func (c *CLI) buildPlan() Plan {
 
 	var makespan time.Duration
 	for _, nt := range c.nodeTests {
-		node := PlanNode{
-			Index:            nt.NodeIndex,
-			EstimatedSeconds: nt.TotalDuration.Seconds(),
-			Processes:        []PlanProcess{},
-		}
-		makespan = max(makespan, nt.TotalDuration)
+		node := PlanNode{Index: nt.NodeIndex, Processes: []PlanProcess{}}
+		var total time.Duration
 
 		// Reuse testLines so that the plan matches the generated scripts.
 		for _, line := range c.testLines(nt) {
-			proc := PlanProcess{Package: line.Package, TestPattern: line.TestPattern}
+			total += line.Estimated
+			proc := PlanProcess{
+				Package:          line.Package,
+				Binary:           line.Binary,
+				TestPattern:      line.TestPattern,
+				EstimatedSeconds: line.Estimated.Seconds(),
+				OverheadSeconds:  c.overhead(line.Package).Seconds(),
+			}
 			for _, fn := range line.Functions {
 				ti := infos[types.TestKey{Package: line.Package, Function: fn}]
 				proc.Tests = append(proc.Tests, PlanTest{
@@ -78,6 +86,8 @@ func (c *CLI) buildPlan() Plan {
 			}
 			node.Processes = append(node.Processes, proc)
 		}
+		node.EstimatedSeconds = total.Seconds()
+		makespan = max(makespan, total)
 		plan.Nodes = append(plan.Nodes, node)
 	}
 	plan.MakespanSeconds = makespan.Seconds()
@@ -135,7 +145,7 @@ func (c *CLI) printPlan(w io.Writer) error {
 	for _, n := range plan.Nodes {
 		fmt.Fprintf(w, "\n[node %d]\n", n.Index)
 		for _, p := range n.Processes {
-			fmt.Fprintf(w, "  %s %s\n", p.Package, p.TestPattern)
+			fmt.Fprintf(w, "  %-10s %s %s\n", seconds(p.EstimatedSeconds), p.Package, p.TestPattern)
 		}
 	}
 	return nil

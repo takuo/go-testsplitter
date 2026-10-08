@@ -34,14 +34,21 @@ type Result struct {
 type Results struct {
 	// Tests is the duration of top-level tests. If a test appears more than once (e.g. rerun), the last result wins.
 	Tests map[types.TestKey]Result
+	// Overheads is the per-process overhead samples of each package: the package elapsed time
+	// minus the sum of its top-level test durations (e.g. process startup and TestMain).
+	Overheads map[string][]Result
 }
 
 // ParseGoTestJSONL parses `go test -json` output (JSON Lines). Subtests are ignored.
 // Lines that are not valid JSON are skipped.
 func ParseGoTestJSONL(r io.Reader) (*Results, error) {
 	p := &jsonlParser{
-		results: &Results{Tests: make(map[types.TestKey]Result)},
-		starts:  make(map[types.TestKey]time.Time),
+		results: &Results{
+			Tests:     make(map[types.TestKey]Result),
+			Overheads: make(map[string][]Result),
+		},
+		starts:   make(map[types.TestKey]time.Time),
+		testsSum: make(map[string]time.Duration),
 	}
 
 	br := bufio.NewReader(r)
@@ -62,6 +69,8 @@ func ParseGoTestJSONL(r io.Reader) (*Results, error) {
 type jsonlParser struct {
 	results *Results
 	starts  map[types.TestKey]time.Time
+	// testsSum is the sum of top-level test durations of each package since its last package-level result.
+	testsSum map[string]time.Duration
 }
 
 func (p *jsonlParser) parseLine(line []byte, lineNo int) {
@@ -70,11 +79,17 @@ func (p *jsonlParser) parseLine(line []byte, lineNo int) {
 		slog.Warn("Skipping invalid JSON line", "line", lineNo, "err", err)
 		return
 	}
-	if ev.Test == "" || strings.Contains(ev.Test, "/") {
-		return // ignore package-level events and subtests
-	}
 	if !isResult(ev.Action) && ev.Action != "run" {
 		return
+	}
+	if ev.Test == "" {
+		if isResult(ev.Action) {
+			p.packageResult(ev)
+		}
+		return
+	}
+	if strings.Contains(ev.Test, "/") {
+		return // ignore subtests
 	}
 
 	key := types.TestKey{Package: ev.Package, Function: ev.Test}
@@ -90,6 +105,18 @@ func (p *jsonlParser) parseLine(line []byte, lineNo int) {
 		d = ev.Time.Sub(p.starts[key])
 	}
 	p.results.Tests[key] = Result{Duration: d, Time: ev.Time}
+	p.testsSum[ev.Package] += d
+}
+
+// packageResult records the overhead of a test process from a package-level result.
+func (p *jsonlParser) packageResult(ev testEvent) {
+	sum := p.testsSum[ev.Package]
+	delete(p.testsSum, ev.Package)
+	if ev.Elapsed <= 0 || sum == 0 {
+		return // no timing, or no tests ran (e.g. build failure)
+	}
+	overhead := max(seconds(ev.Elapsed)-sum, 0) // parallel tests may exceed the elapsed time
+	p.results.Overheads[ev.Package] = append(p.results.Overheads[ev.Package], Result{Duration: overhead, Time: ev.Time})
 }
 
 func isResult(action string) bool {

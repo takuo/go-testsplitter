@@ -81,3 +81,35 @@ func TestParseGoTestJSONL_Time(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Result{Duration: time.Second, Time: time.Date(2023, 1, 1, 0, 0, 1, 0, time.UTC)}, got.Tests[key("pkg", "TestA")])
 }
+
+func TestParseGoTestJSONL_Overheads(t *testing.T) {
+	// Two processes of pkg (concatenated), and one of other with parallel tests and one without timing.
+	input := `{"Action":"start","Package":"pkg"}
+{"Action":"run","Package":"pkg","Test":"TestA"}
+{"Action":"pass","Package":"pkg","Test":"TestA","Elapsed":1}
+{"Action":"run","Package":"pkg","Test":"TestA/sub"}
+{"Action":"pass","Package":"pkg","Test":"TestA/sub","Elapsed":0.5}
+{"Action":"run","Package":"pkg","Test":"TestB"}
+{"Action":"pass","Package":"pkg","Test":"TestB","Elapsed":2}
+{"Action":"pass","Package":"pkg","Elapsed":3.5}
+{"Action":"start","Package":"pkg"}
+{"Action":"run","Package":"pkg","Test":"TestC"}
+{"Action":"fail","Package":"pkg","Test":"TestC","Elapsed":1}
+{"Action":"fail","Package":"pkg","Elapsed":3}
+{"Action":"run","Package":"other","Test":"TestX"}
+{"Action":"pass","Package":"other","Test":"TestX","Elapsed":2}
+{"Action":"run","Package":"other","Test":"TestY"}
+{"Action":"pass","Package":"other","Test":"TestY","Elapsed":2}
+{"Action":"pass","Package":"other","Elapsed":2.5}
+{"Action":"run","Package":"nodur","Test":"TestZ"}
+{"Action":"pass","Package":"nodur","Test":"TestZ","Elapsed":1}
+{"Action":"pass","Package":"nodur"}
+{"Action":"fail","Package":"broken","Elapsed":0.1}`
+
+	got, err := ParseGoTestJSONL(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]Result{
+		"pkg":   {{Duration: 500 * time.Millisecond}, {Duration: 2 * time.Second}},
+		"other": {{Duration: 0}}, // parallel tests: clamped to zero
+	}, got.Overheads)
+}

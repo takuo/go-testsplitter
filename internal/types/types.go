@@ -52,6 +52,6 @@ type TestLine struct {
 	TestPattern string
 	// Functions is the test functions matched by TestPattern.
 	Functions []string
-	// Estimated is the estimated duration of the process.
+	// Estimated is the estimated duration of the process, including the package overhead.
 	Estimated time.Duration
 }

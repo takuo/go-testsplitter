@@ -73,41 +73,6 @@ func TestDefaultDuration(t *testing.T) {
 	}).estimateDefaultDuration())
 }
 
-func TestLoadTestDurations(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, content string) {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
-	}
-	// newer.jsonl sorts before older.jsonl, but its results are newer
-	write("newer.jsonl", `{"Time":"2026-10-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":2}
-{"Time":"2026-10-01T00:00:01Z","Action":"pass","Package":"p","Elapsed":3}
-`)
-	write("older.jsonl", `{"Time":"2026-09-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":9}
-{"Time":"2026-09-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestOld","Elapsed":9}
-{"Time":"2026-09-01T00:00:01Z","Action":"pass","Package":"p","Elapsed":28}
-`)
-	write("notime.jsonl", `{"Action":"pass","Package":"p","Test":"TestA","Elapsed":7}
-`)
-	now := func() time.Time { return time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC) }
-
-	cli := &CLI{JSONDir: dir, now: now}
-	require.NoError(t, cli.loadTestDurations())
-	assert.Equal(t, map[types.TestKey]time.Duration{
-		key("p", "TestA"):   2 * time.Second, // newest wins regardless of file order
-		key("p", "TestOld"): 9 * time.Second,
-	}, cli.testDurations)
-
-	cli = &CLI{JSONDir: dir, now: now, MaxAge: 30 * 24 * time.Hour}
-	require.NoError(t, cli.loadTestDurations())
-	assert.Equal(t, map[types.TestKey]time.Duration{key("p", "TestA"): 2 * time.Second}, cli.testDurations)
-}
-
-func TestLoadTestDurations_NoDirectory(t *testing.T) {
-	cli := &CLI{JSONDir: filepath.Join(t.TempDir(), "missing")}
-	require.NoError(t, cli.loadTestDurations())
-	assert.Empty(t, cli.testDurations)
-}
-
 func TestSplitTests(t *testing.T) {
 	cli := &CLI{
 		Nodes: 2,
@@ -159,26 +124,78 @@ func TestTestLines(t *testing.T) {
 			"b": {"TestB1"},
 		},
 	}
-	cli := &CLI{testDurations: map[types.TestKey]time.Duration{
+	durations := map[types.TestKey]time.Duration{
 		key("a", "TestA1"): 1 * time.Second,
 		key("a", "TestA2"): 2 * time.Second,
 		key("a", "TestA3"): 3 * time.Second,
 		key("a", "TestA4"): 4 * time.Second,
 		key("b", "TestB1"): 5 * time.Second,
-	}}
+	}
 
-	// longest first
+	// longest first, package overhead included
+	cli := &CLI{testDurations: durations, overheads: map[string]time.Duration{"b": time.Second}}
 	assert.Equal(t, []types.TestLine{
 		{Index: 1, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2|TestA3|TestA4)$", Functions: []string{"TestA1", "TestA2", "TestA3", "TestA4"}, Estimated: 10 * time.Second},
-		{Index: 2, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}, Estimated: 5 * time.Second},
+		{Index: 2, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}, Estimated: 6 * time.Second},
 	}, cli.testLines(nt))
 
+	// -m 2: functions are grouped by duration ({4s, 1s}, {3s, 2s}), not by name
 	cli.MaxFunctions = 2
 	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "a", Binary: "a.test", TestPattern: "^(TestA3|TestA4)$", Functions: []string{"TestA3", "TestA4"}, Estimated: 7 * time.Second},
-		{Index: 2, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}, Estimated: 5 * time.Second},
-		{Index: 3, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2)$", Functions: []string{"TestA1", "TestA2"}, Estimated: 3 * time.Second},
+		{Index: 1, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}, Estimated: 6 * time.Second},
+		{Index: 2, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA4)$", Functions: []string{"TestA1", "TestA4"}, Estimated: 5 * time.Second},
+		{Index: 3, Package: "a", Binary: "a.test", TestPattern: "^(TestA2|TestA3)$", Functions: []string{"TestA2", "TestA3"}, Estimated: 5 * time.Second},
 	}, cli.testLines(nt))
+}
+
+func TestLoadTestDurations(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	}
+	// newer.jsonl sorts before older.jsonl, but its results are newer
+	write("newer.jsonl", `{"Time":"2026-10-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":2}
+{"Time":"2026-10-01T00:00:01Z","Action":"pass","Package":"p","Elapsed":3}
+`)
+	write("older.jsonl", `{"Time":"2026-09-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":9}
+{"Time":"2026-09-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestOld","Elapsed":9}
+{"Time":"2026-09-01T00:00:01Z","Action":"pass","Package":"p","Elapsed":28}
+`)
+	write("notime.jsonl", `{"Action":"pass","Package":"p","Test":"TestA","Elapsed":7}
+`)
+	now := func() time.Time { return time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC) }
+
+	cli := &CLI{JSONDir: dir, now: now}
+	require.NoError(t, cli.loadTestDurations())
+	assert.Equal(t, map[types.TestKey]time.Duration{
+		key("p", "TestA"):   2 * time.Second, // newest wins regardless of file order
+		key("p", "TestOld"): 9 * time.Second,
+	}, cli.testDurations)
+	assert.Equal(t, map[string]time.Duration{"p": 10 * time.Second}, cli.overheads) // median of 1s and 10s
+
+	cli = &CLI{JSONDir: dir, now: now, MaxAge: 30 * 24 * time.Hour}
+	require.NoError(t, cli.loadTestDurations())
+	assert.Equal(t, map[types.TestKey]time.Duration{key("p", "TestA"): 2 * time.Second}, cli.testDurations)
+	assert.Equal(t, map[string]time.Duration{"p": time.Second}, cli.overheads)
+}
+
+func TestLoadTestDurations_NoDirectory(t *testing.T) {
+	cli := &CLI{JSONDir: filepath.Join(t.TempDir(), "missing")}
+	require.NoError(t, cli.loadTestDurations())
+	assert.Empty(t, cli.testDurations)
+}
+
+func TestSplitTests_KeepsCostlyPackagesTogether(t *testing.T) {
+	cli := &CLI{Nodes: 2, overheads: map[string]time.Duration{"p": 30 * time.Second, "q": 30 * time.Second}}
+	for _, pkg := range []string{"p", "q"} {
+		for _, fn := range []string{"TestA", "TestB", "TestC"} {
+			cli.testInfos = append(cli.testInfos, types.TestInfo{TestKey: key(pkg, fn), Duration: time.Second, Known: true})
+		}
+	}
+	cli.splitTests()
+	for _, nt := range cli.nodeTests {
+		assert.Len(t, nt.Packages, 1, "each node runs one package: %v", nt.Packages)
+	}
 }
 
 func TestGenerateScriptFiles(t *testing.T) {
