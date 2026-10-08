@@ -27,9 +27,12 @@ type Plan struct {
 
 // PlanSelection is the result of selecting packages by changes.
 type PlanSelection struct {
-	ChangedSince string   `json:"changed_since"`
-	MergeBase    string   `json:"merge_base"`
-	ChangedFiles []string `json:"changed_files"`
+	ChangedSince string `json:"changed_since"`
+	MergeBase    string `json:"merge_base"`
+	// ComparedDirectly reports whether the merge base was not found in a shallow clone,
+	// and the changes are compared with ChangedSince directly (MergeBase is its commit).
+	ComparedDirectly bool     `json:"compared_directly,omitempty"`
+	ChangedFiles     []string `json:"changed_files"`
 	// RunAllFile is the changed file which matched --run-all-on, if any. Then all packages are selected.
 	RunAllFile      string            `json:"run_all_file,omitempty"`
 	ChangedPackages []string          `json:"changed_packages"`
@@ -127,15 +130,16 @@ func (c *CLI) buildPlan() Plan {
 
 	if sel := c.selection; sel != nil {
 		ps := &PlanSelection{
-			ChangedSince:    sel.since,
-			MergeBase:       sel.base,
-			ChangedFiles:    nonNil(sel.changedFiles),
-			RunAllFile:      sel.runAllFile,
-			ChangedPackages: nonNil(sel.changedPackages),
-			Selected:        []PlanSelectedPkg{},
-			TotalPackages:   sel.total,
-			Granularity:     "package",
-			SymbolError:     sel.symbolError,
+			ChangedSince:     sel.since,
+			MergeBase:        sel.base,
+			ComparedDirectly: sel.direct,
+			ChangedFiles:     nonNil(sel.changedFiles),
+			RunAllFile:       sel.runAllFile,
+			ChangedPackages:  nonNil(sel.changedPackages),
+			Selected:         []PlanSelectedPkg{},
+			TotalPackages:    sel.total,
+			Granularity:      "package",
+			SymbolError:      sel.symbolError,
 		}
 		if sel.symbol {
 			ps.Granularity = "symbol"
@@ -203,6 +207,9 @@ func (c *CLI) printPlan(w io.Writer) error {
 	}
 
 	if sel := plan.Selection; sel != nil {
+		if sel.ComparedDirectly {
+			fmt.Fprintf(w, "\nCompared with %s directly, since the merge base was not found in the shallow clone", sel.ChangedSince)
+		}
 		if sel.RunAllFile != "" {
 			fmt.Fprintf(w, "\nRunning all %d packages: %s changed since %s\n", sel.TotalPackages, sel.RunAllFile, sel.ChangedSince)
 		} else {

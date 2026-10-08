@@ -375,3 +375,85 @@ func TestChangedSince(t *testing.T) {
 		assert.Equal(t, "TestG", plan.Nodes[0].Processes[0].Tests[0].Function)
 	})
 }
+
+// TestChangedSince_ShallowClone selects tests in a shallow clone, where the merge base cannot be found.
+func TestChangedSince_ShallowClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	binary := buildBinary(t)
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "init.defaultBranch=main"}, args...)...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	origin := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(origin, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.21\n")
+	write("app/app.go", "package app\nfunc G() int { return 1 }\n")
+	write("app/app_test.go", "package app\nimport \"testing\"\nfunc TestG(t *testing.T) { G() }\nfunc TestH(t *testing.T) {}\n")
+	write("indep/indep.go", "package indep\nfunc I() int { return 1 }\n")
+	write("indep/indep_test.go", "package indep\nimport \"testing\"\nfunc TestI(t *testing.T) { I() }\n")
+	git(origin, "init")
+	git(origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
+	git(origin, "add", ".")
+	git(origin, "commit", "-m", "init")
+	git(origin, "switch", "-c", "feature")
+	write("app/app.go", "package app\nfunc G() int { return 2 }\n")
+	git(origin, "commit", "-am", "change G")
+	git(origin, "switch", "main")
+	write("indep/indep.go", "package indep\nfunc I() int { return 3 }\n")
+	git(origin, "commit", "-am", "change I on main")
+	mergeBase := git(origin, "merge-base", "main", "feature")
+
+	work := filepath.Join(t.TempDir(), "work")
+	git(filepath.Dir(work), "clone", "--depth=1", "--branch", "feature", "file://"+origin, work)
+
+	type plan struct {
+		Selection struct {
+			ComparedDirectly bool `json:"compared_directly"`
+			Selected         []struct {
+				Package string            `json:"package"`
+				Tests   map[string]string `json:"tests"`
+			} `json:"selected_packages"`
+		} `json:"selection"`
+	}
+	planOf := func(rev string) (plan, string) {
+		t.Helper()
+		cmd := exec.Command(binary, "-s", "-n", "1", "--dry-run", "--plan", "-", "--changed-since", rev, "--granularity", "symbol")
+		cmd.Dir = work
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		require.NoError(t, err, stderr.String())
+		var p plan
+		require.NoError(t, json.Unmarshal(out, &p), "%s", out)
+		return p, stderr.String()
+	}
+
+	// exact: the merge base commit fetched by SHA (e.g. from the GitHub API)
+	git(work, "fetch", "--depth=1", "--no-tags", "origin", mergeBase)
+	p, stderr := planOf(mergeBase)
+	assert.True(t, p.Selection.ComparedDirectly)
+	assert.Contains(t, stderr, "The merge base was not found in the shallow clone")
+	require.Len(t, p.Selection.Selected, 1)
+	assert.Equal(t, "app", p.Selection.Selected[0].Package)
+	assert.Equal(t, map[string]string{"TestG": "example.com/m/app.G"}, p.Selection.Selected[0].Tests)
+
+	// the base branch tip: changes on main are also included, selecting extra tests
+	git(work, "fetch", "--depth=1", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+	p, _ = planOf("origin/main")
+	var pkgs []string
+	for _, s := range p.Selection.Selected {
+		pkgs = append(pkgs, s.Package)
+	}
+	assert.Equal(t, []string{"app", "indep"}, pkgs)
+}

@@ -13,8 +13,13 @@ import (
 type Changes struct {
 	// Root is the top-level directory of the repository.
 	Root string
-	// Base is the merge base commit of the base revision and HEAD.
+	// Base is the merge base commit of the base revision and HEAD, or the base revision itself
+	// if Direct is true.
 	Base string
+	// Direct reports whether the merge base could not be found in a shallow clone, and the changes are
+	// compared with the base revision directly. Then changes made on the base revision side after the
+	// branch point are also included.
+	Direct bool
 	// Files is the changed files relative to Root, slash-separated and sorted.
 	// It includes committed and uncommitted changes since Base, deleted files, and untracked files.
 	// Renamed files are listed with both the old and new paths.
@@ -22,15 +27,31 @@ type Changes struct {
 }
 
 // ChangedSince returns files changed since the merge base of rev and HEAD, in the repository containing dir.
+//
+// In a shallow clone, the merge base may not be found since the history is truncated.
+// Then the changes are compared with rev directly (Changes.Direct). To get exact changes in a shallow
+// clone, fetch the merge base commit (e.g. from the GitHub API) and pass it as rev.
 func ChangedSince(ctx context.Context, dir, rev string) (*Changes, error) {
 	root, err := git(ctx, dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, err
 	}
 	root = strings.TrimSpace(root)
-	base, err := git(ctx, root, "merge-base", rev, "HEAD")
+
+	commit, err := git(ctx, root, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}")
 	if err != nil {
-		return nil, fmt.Errorf("failed to find the merge base of %s and HEAD: %w", rev, err)
+		return nil, fmt.Errorf("unknown revision %s: %w", rev, err)
+	}
+	commit = strings.TrimSpace(commit)
+
+	direct := false
+	base, err := git(ctx, root, "merge-base", commit, "HEAD")
+	if err != nil {
+		shallow, serr := git(ctx, root, "rev-parse", "--is-shallow-repository")
+		if serr != nil || strings.TrimSpace(shallow) != "true" {
+			return nil, fmt.Errorf("failed to find the merge base of %s and HEAD: %w", rev, err)
+		}
+		base, direct = commit, true
 	}
 	base = strings.TrimSpace(base)
 
@@ -53,7 +74,7 @@ func ChangedSince(ctx context.Context, dir, rev string) (*Changes, error) {
 		}
 	}
 	slices.Sort(files)
-	return &Changes{Root: root, Base: base, Files: slices.Compact(files)}, nil
+	return &Changes{Root: root, Base: base, Direct: direct, Files: slices.Compact(files)}, nil
 }
 
 func git(ctx context.Context, dir string, args ...string) (string, error) {

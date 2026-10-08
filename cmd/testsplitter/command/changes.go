@@ -16,8 +16,10 @@ import (
 
 // selection is the result of selecting packages by changes.
 type selection struct {
-	since        string
-	base         string
+	since string
+	base  string
+	// direct reports whether the changes are compared with the revision directly in a shallow clone.
+	direct       bool
 	changedFiles []string
 	// runAllFile is the changed file which matched --run-all-on. Empty if not matched.
 	runAllFile string
@@ -52,11 +54,17 @@ func (c *CLI) selectChangedPackages(ctx context.Context) error {
 	sel := &selection{
 		since:        c.ChangedSince,
 		base:         changes.Base,
+		direct:       changes.Direct,
 		changedFiles: changes.Files,
 		affectedBy:   make(map[string][]string),
 		total:        len(c.packages),
 	}
 	c.selection = sel
+	if changes.Direct {
+		slog.Warn("The merge base was not found in the shallow clone; comparing with the revision directly. "+
+			"Changes on the revision side after the branch point are also included. Pass the merge base commit to get exact changes",
+			"revision", c.ChangedSince)
+	}
 
 	if c.RunAllOn != "" {
 		re := regexp.MustCompile(c.RunAllOn) // validated in Validate

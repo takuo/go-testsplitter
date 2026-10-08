@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,10 +73,74 @@ func TestChangedSince_UnknownRevision(t *testing.T) {
 	run(t, dir, "commit", "-m", "init")
 
 	_, err := ChangedSince(context.Background(), dir, "no-such-branch")
-	assert.ErrorContains(t, err, "merge base of no-such-branch")
+	assert.ErrorContains(t, err, "unknown revision no-such-branch")
 }
 
 func TestChangedSince_NotRepository(t *testing.T) {
 	_, err := ChangedSince(context.Background(), t.TempDir(), "main")
 	assert.Error(t, err)
+}
+
+func output(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	require.NoError(t, err, "git %v", args)
+	return strings.TrimSpace(string(out))
+}
+
+func TestChangedSince_ShallowClone(t *testing.T) {
+	// origin: main moves forward after feature branches off
+	origin := t.TempDir()
+	run(t, origin, "init")
+	run(t, origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
+	write(t, origin, "a.txt", "a\n")
+	run(t, origin, "add", ".")
+	run(t, origin, "commit", "-m", "base")
+	run(t, origin, "switch", "-c", "feature")
+	write(t, origin, "f.txt", "f\n")
+	run(t, origin, "add", ".")
+	run(t, origin, "commit", "-m", "feature 1")
+	write(t, origin, "g.txt", "g\n")
+	run(t, origin, "add", ".")
+	run(t, origin, "commit", "-m", "feature 2")
+	run(t, origin, "switch", "main")
+	write(t, origin, "a.txt", "changed on main\n")
+	run(t, origin, "commit", "-am", "main change")
+	mergeBase := output(t, origin, "merge-base", "main", "feature")
+
+	work := filepath.Join(t.TempDir(), "work")
+	run(t, filepath.Dir(work), "clone", "--depth=1", "--branch", "feature", "file://"+origin, work)
+	ctx := context.Background()
+
+	t.Run("merge base commit fetched by SHA", func(t *testing.T) {
+		run(t, work, "fetch", "--depth=1", "origin", mergeBase)
+		got, err := ChangedSince(ctx, work, mergeBase)
+		require.NoError(t, err)
+		assert.True(t, got.Direct)
+		assert.Equal(t, mergeBase, got.Base)
+		assert.Equal(t, []string{"f.txt", "g.txt"}, got.Files, "exactly the changes of the branch")
+	})
+
+	t.Run("base branch tip", func(t *testing.T) {
+		run(t, work, "fetch", "--depth=1", "origin", "+refs/heads/main:refs/remotes/origin/main")
+		got, err := ChangedSince(ctx, work, "origin/main")
+		require.NoError(t, err)
+		assert.True(t, got.Direct)
+		assert.Equal(t, []string{"a.txt", "f.txt", "g.txt"}, got.Files, "includes changes on main")
+	})
+}
+
+func TestChangedSince_UnrelatedHistories(t *testing.T) {
+	dir := t.TempDir()
+	run(t, dir, "init")
+	write(t, dir, "a.txt", "a\n")
+	run(t, dir, "add", ".")
+	run(t, dir, "commit", "-m", "init")
+	run(t, dir, "switch", "--orphan", "other")
+	write(t, dir, "b.txt", "b\n")
+	run(t, dir, "add", ".")
+	run(t, dir, "commit", "-m", "other")
+
+	_, err := ChangedSince(context.Background(), dir, "main")
+	assert.ErrorContains(t, err, "merge base of main")
 }
