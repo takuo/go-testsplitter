@@ -113,6 +113,7 @@ func TestPlanSelection(t *testing.T) {
 			{Package: "pkg2", AffectedBy: []string{"m/lib", "m/pkg2"}},
 		},
 		TotalPackages: 5,
+		Granularity:   "package",
 	}, plan.Selection)
 
 	var buf bytes.Buffer
@@ -126,4 +127,29 @@ func TestPlanSelection(t *testing.T) {
 
 	cli.selection = nil
 	assert.Nil(t, cli.buildPlan().Selection)
+}
+
+func TestPlanSelection_Symbol(t *testing.T) {
+	cli := planCLI()
+	cli.packages = []scanner.Package{{Dir: "pkg1"}, {Dir: "pkg2"}}
+	cli.selection = &selection{
+		since:          "main",
+		changedFiles:   []string{"lib/a.go"},
+		total:          3,
+		symbol:         true,
+		changedSymbols: []string{"m/lib.A"},
+		tests:          map[string]map[string]string{"pkg1": {"TestA": "m/lib.A"}},
+		allReasons:     map[string]string{"pkg2": "TestMain depends on changed m/lib.A"},
+	}
+	plan := cli.buildPlan()
+	assert.Equal(t, "symbol", plan.Selection.Granularity)
+	assert.Equal(t, []string{"m/lib.A"}, plan.Selection.ChangedSymbols)
+	assert.Equal(t, []PlanSelectedPkg{
+		{Package: "pkg1", Tests: map[string]string{"TestA": "m/lib.A"}},
+		{Package: "pkg2", AllTestsReason: "TestMain depends on changed m/lib.A"},
+	}, plan.Selection.Selected)
+
+	var buf bytes.Buffer
+	require.NoError(t, cli.printPlan(&buf))
+	assert.Contains(t, buf.String(), "Changed declarations (1): m/lib.A\n  pkg1: TestA (m/lib.A)\n  pkg2: all tests (TestMain depends on changed m/lib.A)\n")
 }

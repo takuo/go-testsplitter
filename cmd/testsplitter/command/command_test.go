@@ -332,3 +332,25 @@ func TestDefaultRunAllOn(t *testing.T) {
 		assert.False(t, re.MatchString(f), f)
 	}
 }
+
+func TestFilterTestFunctions(t *testing.T) {
+	cli := &CLI{
+		testFunctions: map[string][]string{
+			"a": {"TestA1", "TestA2"},
+			"b": {"TestB1"},
+			"c": {"TestC1"},
+		},
+		selection: &selection{tests: map[string]map[string]string{
+			"a": {"TestA2": "m/x.X", "TestRemoved": "m/x.X"},
+			"b": {"TestOther": "m/x.X"},
+			// c: all tests
+		}},
+	}
+	cli.filterTestFunctions()
+	assert.Equal(t, map[string][]string{"a": {"TestA2"}, "c": {"TestC1"}}, cli.testFunctions)
+
+	// package granularity keeps everything
+	cli = &CLI{testFunctions: map[string][]string{"a": {"TestA1"}}, selection: &selection{}}
+	cli.filterTestFunctions()
+	assert.Equal(t, map[string][]string{"a": {"TestA1"}}, cli.testFunctions)
+}

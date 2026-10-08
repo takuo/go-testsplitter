@@ -334,5 +334,44 @@ func TestChangedSince(t *testing.T) {
 		sel = planOf("--dry-run", "--run-all-on", "")
 		assert.Empty(t, sel.RunAllFile)
 		assert.Empty(t, sel.Selected, "go.mod belongs to no package")
+		git("checkout", "go.mod")
+	})
+
+	t.Run("symbol granularity", func(t *testing.T) {
+		// adding a constant to a widely imported package
+		write("lib/lib.go", "package lib\nfunc F() int { return 1 }\nconst C = 3\n")
+		assert.Equal(t, []string{"app", "tonly"}, packages(planOf("--dry-run")))
+		assert.Empty(t, packages(planOf("--dry-run", "--granularity", "symbol")))
+
+		// changing a function used only by app
+		write("app/app.go", "package app\nimport \"example.com/m/lib\"\nfunc G() int { return lib.F() + 1 }\n")
+		cmd := exec.Command(binary, "-s", "-n", "1", "--plan", "-", "--changed-since", "main", "--granularity", "symbol")
+		cmd.Dir = work
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		var plan struct {
+			Nodes []struct {
+				Processes []struct {
+					Package string `json:"package"`
+					Tests   []struct {
+						Function string `json:"function"`
+					} `json:"tests"`
+				} `json:"processes"`
+			} `json:"nodes"`
+			Selection struct {
+				Granularity string `json:"granularity"`
+				Selected    []struct {
+					Package string            `json:"package"`
+					Tests   map[string]string `json:"tests"`
+				} `json:"selected_packages"`
+			} `json:"selection"`
+		}
+		require.NoError(t, json.Unmarshal(out, &plan), "%s", out)
+		assert.Equal(t, "symbol", plan.Selection.Granularity)
+		require.Len(t, plan.Selection.Selected, 1)
+		assert.Equal(t, "app", plan.Selection.Selected[0].Package)
+		assert.Equal(t, map[string]string{"TestG": "example.com/m/app.G"}, plan.Selection.Selected[0].Tests)
+		require.Len(t, plan.Nodes[0].Processes, 1)
+		assert.Equal(t, "TestG", plan.Nodes[0].Processes[0].Tests[0].Function)
 	})
 }

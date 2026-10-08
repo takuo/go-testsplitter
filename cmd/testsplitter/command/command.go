@@ -43,6 +43,7 @@ type CLI struct {
 	ScanPackages    bool          `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
 	Exclude         string        `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
 	ChangedSince    string        `long:"changed-since" placeholder:"REV" help:"Run only tests of packages affected by changes since the merge base of REV and HEAD (e.g. origin/main)"`
+	Granularity     string        `long:"granularity" enum:"package,symbol" default:"package" help:"With --changed-since, select tests by affected packages, or by affected top-level declarations (package,symbol)"`
 	RunAllOn        string        `long:"run-all-on" placeholder:"REGEX" default:"(^|/)go[.](mod|sum|work)$" help:"With --changed-since, run all tests if a changed file path (relative to the repository root) matches REGEX ('' to disable)"`
 	JSONDir         string        `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
 	MaxAge          time.Duration `long:"max-age" default:"0s" help:"Ignore previous results older than this duration, e.g. 720h (0: no limit)"`
@@ -239,8 +240,11 @@ func (c *CLI) readPackagesFromStdin() ([]string, error) {
 }
 
 func (c *CLI) scanTestFunctions() (err error) {
-	c.testFunctions, err = scanner.ScanTestFunctions(c.packages)
-	return err
+	if c.testFunctions, err = scanner.ScanTestFunctions(c.packages); err != nil {
+		return err
+	}
+	c.filterTestFunctions()
+	return nil
 }
 
 func (c *CLI) loadTestDurations() error {

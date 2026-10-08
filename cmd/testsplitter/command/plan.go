@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -33,6 +35,11 @@ type PlanSelection struct {
 	ChangedPackages []string          `json:"changed_packages"`
 	Selected        []PlanSelectedPkg `json:"selected_packages"`
 	TotalPackages   int               `json:"total_packages"`
+	// Granularity is "symbol" when tests are selected by changed declarations, otherwise "package".
+	Granularity    string   `json:"granularity"`
+	ChangedSymbols []string `json:"changed_symbols,omitempty"`
+	// SymbolError is why the symbol analysis failed, if any. Then tests are selected by package.
+	SymbolError string `json:"symbol_error,omitempty"`
 }
 
 // PlanSelectedPkg is a package selected by changes.
@@ -40,6 +47,10 @@ type PlanSelectedPkg struct {
 	Package string `json:"package"`
 	// AffectedBy is the changed packages (import paths) the tests depend on. Empty when all packages are selected.
 	AffectedBy []string `json:"affected_by,omitempty"`
+	// Tests maps a selected test function to a changed declaration it depends on (with --granularity symbol).
+	Tests map[string]string `json:"tests,omitempty"`
+	// AllTestsReason is why all tests of the package are selected (with --granularity symbol).
+	AllTestsReason string `json:"all_tests_reason,omitempty"`
 }
 
 // PlanNode is the tests assigned to a node.
@@ -123,9 +134,20 @@ func (c *CLI) buildPlan() Plan {
 			ChangedPackages: nonNil(sel.changedPackages),
 			Selected:        []PlanSelectedPkg{},
 			TotalPackages:   sel.total,
+			Granularity:     "package",
+			SymbolError:     sel.symbolError,
+		}
+		if sel.symbol {
+			ps.Granularity = "symbol"
+			ps.ChangedSymbols = nonNil(sel.changedSymbols)
 		}
 		for _, pkg := range c.packages {
-			ps.Selected = append(ps.Selected, PlanSelectedPkg{Package: pkg.Dir, AffectedBy: sel.affectedBy[pkg.Dir]})
+			ps.Selected = append(ps.Selected, PlanSelectedPkg{
+				Package:        pkg.Dir,
+				AffectedBy:     sel.affectedBy[pkg.Dir],
+				Tests:          sel.tests[pkg.Dir],
+				AllTestsReason: sel.allReasons[pkg.Dir],
+			})
 		}
 		plan.Selection = ps
 	}
@@ -186,8 +208,32 @@ func (c *CLI) printPlan(w io.Writer) error {
 		} else {
 			fmt.Fprintf(w, "\nSelected %d of %d packages affected by %d changed files since %s\n",
 				len(sel.Selected), sel.TotalPackages, len(sel.ChangedFiles), sel.ChangedSince)
+			if sel.SymbolError != "" {
+				fmt.Fprintf(w, "Symbol analysis failed, selected by package: %s\n", sel.SymbolError)
+			}
+			if sel.Granularity == "symbol" {
+				const maxSymbols = 10
+				symbols := sel.ChangedSymbols
+				more := ""
+				if len(symbols) > maxSymbols {
+					more = fmt.Sprintf(" and %d more", len(symbols)-maxSymbols)
+					symbols = symbols[:maxSymbols]
+				}
+				fmt.Fprintf(w, "Changed declarations (%d): %s%s\n", len(sel.ChangedSymbols), strings.Join(symbols, ", "), more)
+			}
 			for _, p := range sel.Selected {
-				fmt.Fprintf(w, "  %s (affected by %s)\n", p.Package, strings.Join(p.AffectedBy, ", "))
+				switch {
+				case p.Tests != nil:
+					var tests []string
+					for _, fn := range slices.Sorted(maps.Keys(p.Tests)) {
+						tests = append(tests, fn+" ("+p.Tests[fn]+")")
+					}
+					fmt.Fprintf(w, "  %s: %s\n", p.Package, strings.Join(tests, ", "))
+				case p.AllTestsReason != "":
+					fmt.Fprintf(w, "  %s: all tests (%s)\n", p.Package, p.AllTestsReason)
+				default:
+					fmt.Fprintf(w, "  %s (affected by %s)\n", p.Package, strings.Join(p.AffectedBy, ", "))
+				}
 			}
 		}
 	}
