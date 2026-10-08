@@ -68,4 +68,12 @@ func main() {}
 	slices.Sort(got)
 	slices.Sort(want)
 	assert.Equal(t, want, got)
+
+	// サブディレクトリから実行した場合はカレントディレクトリからの相対パス
+	t.Chdir(pkg2)
+	got, err = ScanPackages("")
+	require.NoError(t, err)
+	want = []string{".", "subpkg"}
+	slices.Sort(got)
+	assert.Equal(t, want, got)
 }

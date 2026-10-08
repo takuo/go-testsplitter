@@ -53,7 +53,7 @@ func ScanPackages(excludePattern string) ([]string, error) {
 		if excludeRegex != nil && excludeRegex.MatchString(pkg.ImportPath) {
 			continue
 		}
-		relPath, err := filepath.Rel(pkg.Root, pkg.Dir)
+		relPath, err := filepath.Rel(cwd, pkg.Dir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get relative path for %s: %w", pkg.Dir, err)
 		}
