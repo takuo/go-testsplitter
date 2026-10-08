@@ -6,7 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"log"
+	"log/slog"
 	"slices"
 	"unicode"
 	"unicode/utf8"
@@ -32,15 +32,15 @@ func ScanTestFunctions(packages []Package) (map[string][]string, error) {
 			}
 		}
 		if len(functions) == 0 {
-			log.Printf("No test functions found in package %s", pkg.Dir)
+			slog.Debug("No test functions found", "package", pkg.Dir)
 			continue
 		}
 		slices.Sort(functions)
 		functions = slices.Compact(functions)
 		funcs[pkg.Dir] = functions
-		log.Printf("Found %d test functions in package %s", len(functions), pkg.Dir)
+		slog.Debug("Found test functions", "package", pkg.Dir, "count", len(functions))
 	}
-	log.Printf("Found test functions in %d packages", len(funcs))
+	slog.Info("Scanned test functions", "packages", len(funcs))
 	return funcs, nil
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"io/fs"
 	"os"
@@ -75,7 +76,7 @@ func TestMainIntegration(t *testing.T) {
 			outputDir := t.TempDir()
 			output := runSplitter(t, binary, dir, input,
 				"-d", "-n", strconv.Itoa(nodes), "-o", outputDir, "--", "-test.timeout=20m", "-test.v")
-			assert.Contains(t, output, "Loaded 9 testcases durations from 3 files in ./test-json")
+			assert.Contains(t, output, `msg="Loaded test durations" tests=9 files=3 dir=./test-json`)
 
 			for i := range nodes {
 				name := "test-node-" + strconv.Itoa(i) + ".sh"
@@ -99,6 +100,48 @@ func TestScanPackagesWithExclude(t *testing.T) {
 	assert.Contains(t, string(b), "'pkg1'")
 	assert.Contains(t, string(b), "'pkg3'")
 	assert.NotContains(t, string(b), "'pkg2'")
+}
+
+func TestDryRunAndPlan(t *testing.T) {
+	binary := buildBinary(t)
+	dir := testdataDir(t)
+	work := t.TempDir()
+	scripts := filepath.Join(work, "scripts")
+	planFile := filepath.Join(work, "plan.json")
+	input := "example/pkg1\nexample/pkg2\nexample/pkg3\n"
+
+	cmd := exec.Command(binary, "--dry-run", "-q", "-n", "2", "-o", scripts, "-p", filepath.Join(work, "bin"), "--plan", planFile)
+	cmd.Stdin = strings.NewReader(input)
+	cmd.Dir = dir
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	require.NoError(t, cmd.Run(), stderr.String())
+
+	assert.Empty(t, stderr.String(), "quiet mode prints no info logs")
+	assert.Contains(t, stdout.String(), "NODE  TESTS  PROCESSES  ESTIMATED")
+	assert.Contains(t, stdout.String(), "Total 12 tests")
+	assert.NoDirExists(t, scripts, "dry-run must not write scripts")
+	assert.NoDirExists(t, filepath.Join(work, "bin"), "dry-run must not build binaries")
+
+	b, err := os.ReadFile(planFile)
+	require.NoError(t, err)
+	var plan struct {
+		TotalTests int `json:"total_tests"`
+		Nodes      []struct {
+			Index int `json:"index"`
+		} `json:"nodes"`
+	}
+	require.NoError(t, json.Unmarshal(b, &plan))
+	assert.Equal(t, 12, plan.TotalTests)
+	assert.Len(t, plan.Nodes, 2)
+
+	// --plan - with --dry-run prints only JSON to stdout
+	cmd = exec.Command(binary, "--dry-run", "-n", "2", "--plan", "-")
+	cmd.Stdin = strings.NewReader(input)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(out), "%s", out)
 }
 
 func TestInvalidArguments(t *testing.T) {

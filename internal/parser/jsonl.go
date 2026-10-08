@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -48,7 +48,7 @@ func ParseGoTestJSONL(r io.Reader) (map[types.TestKey]time.Duration, error) {
 func parseLine(line []byte, lineNo int, starts map[types.TestKey]time.Time, results map[types.TestKey]time.Duration) {
 	var ev testEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
-		log.Printf("Skipping invalid JSON at line %d: %v", lineNo, err)
+		slog.Warn("Skipping invalid JSON line", "line", lineNo, "err", err)
 		return
 	}
 	if ev.Test == "" || strings.Contains(ev.Test, "/") {

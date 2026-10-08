@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -29,6 +30,9 @@ import (
 
 // fallbackDuration is used for tests without previous results when no results are available at all.
 const fallbackDuration = 5 * time.Second
+
+// scriptNameRe matches generated script file names.
+var scriptNameRe = regexp.MustCompile(`^test-node-(\d+)\.sh$`)
 
 // CLI main command line interface
 type CLI struct {
@@ -48,16 +52,24 @@ type CLI struct {
 	BuildConcurrency int    `short:"b" long:"build-concurrency" default:"4" help:"Number of packages built in parallel (go test -p)"`
 	DisableBuild     bool   `short:"d" long:"disable-build" default:"false" help:"Disable building test binaries (use pre-built binaries by other way)"`
 
+	DryRun bool   `long:"dry-run" help:"Print the split plan without building test binaries or writing scripts"`
+	Plan   string `long:"plan" placeholder:"FILE" help:"Write the split plan as JSON to FILE ('-' for stdout)"`
+
+	Quiet   bool `short:"q" long:"quiet" xor:"verbosity" help:"Print only warnings and errors"`
+	Verbose bool `long:"verbose" xor:"verbosity" help:"Print debug logs"`
+
 	Version kong.VersionFlag `short:"v" long:"version" help:"Print version and exit"`
 
 	// Runtime context
-	stdin         io.Reader                       `kong:"-"`
-	packages      []scanner.Package               `kong:"-"`
-	testFunctions map[string][]string             `kong:"-"`
-	testDurations map[types.TestKey]time.Duration `kong:"-"`
-	testInfos     []types.TestInfo                `kong:"-"`
-	nodeTests     []*types.NodeTest               `kong:"-"`
-	template      string                          `kong:"-"`
+	stdin           io.Reader                       `kong:"-"`
+	stdout          io.Writer                       `kong:"-"`
+	packages        []scanner.Package               `kong:"-"`
+	testFunctions   map[string][]string             `kong:"-"`
+	testDurations   map[types.TestKey]time.Duration `kong:"-"`
+	defaultDuration time.Duration                   `kong:"-"`
+	testInfos       []types.TestInfo                `kong:"-"`
+	nodeTests       []*types.NodeTest               `kong:"-"`
+	template        string                          `kong:"-"`
 }
 
 // Validate validates the command line arguments (called by kong).
@@ -88,10 +100,12 @@ func (c *CLI) Validate() error {
 
 // Run run the command line
 func (c *CLI) Run(ctx context.Context) error {
+	slog.SetDefault(newLogger(os.Stderr, c.logLevel()))
+
 	if err := c.listPackages(); err != nil {
 		return err
 	}
-	if !c.DisableBuild {
+	if !c.DisableBuild && !c.DryRun {
 		if err := c.buildTestBinaries(ctx); err != nil {
 			return fmt.Errorf("failed to build test binaries: %w", err)
 		}
@@ -102,21 +116,42 @@ func (c *CLI) Run(ctx context.Context) error {
 
 	// Load previous test results
 	if err := c.loadTestDurations(); err != nil {
-		log.Printf("Warning: Failed to load test durations: %v", err)
+		slog.Warn("Failed to load test durations", "err", err)
 	}
 
 	c.createTestInfos()
 	c.splitTests()
 
-	if err := c.loadTemplate(); err != nil {
-		return fmt.Errorf("failed to load template: %w", err)
+	if c.Plan != "" {
+		if err := c.writePlanJSON(c.Plan); err != nil {
+			return fmt.Errorf("failed to write plan: %w", err)
+		}
 	}
-	if err := c.generateScriptFiles(); err != nil {
+
+	// Load and parse the template even in dry-run mode to report errors early
+	tmpl, err := c.parseTemplate()
+	if err != nil {
+		return err
+	}
+	if c.DryRun {
+		if c.Plan == "-" {
+			return nil // JSON plan is already written to stdout
+		}
+		return c.printPlan(c.output())
+	}
+	if err := c.generateScriptFiles(tmpl); err != nil {
 		return fmt.Errorf("failed to generate script files: %w", err)
 	}
 
-	fmt.Printf("Generated %d test script files in %s\n", c.Nodes, c.ScriptsDir)
+	slog.Info("Generated test scripts", "nodes", c.Nodes, "dir", c.ScriptsDir)
 	return nil
+}
+
+func (c *CLI) output() io.Writer {
+	if c.stdout != nil {
+		return c.stdout
+	}
+	return os.Stdout
 }
 
 func (c *CLI) listPackages() error {
@@ -131,14 +166,14 @@ func (c *CLI) listPackages() error {
 		if patterns, err = c.readPackagesFromStdin(); err != nil {
 			return fmt.Errorf("failed to read packages from stdin: %w", err)
 		}
-		log.Printf("Read %d packages from stdin", len(patterns))
+		slog.Info("Read packages from stdin", "count", len(patterns))
 	}
 
 	var err error
 	if c.packages, err = scanner.ListPackages(patterns, exclude); err != nil {
 		return fmt.Errorf("failed to list packages: %w", err)
 	}
-	log.Printf("Found %d packages with test files", len(c.packages))
+	slog.Info("Found packages with test files", "count", len(c.packages))
 	return nil
 }
 
@@ -153,6 +188,17 @@ func (c *CLI) loadTemplate() error {
 	}
 	c.template = string(data)
 	return nil
+}
+
+func (c *CLI) parseTemplate() (*template.Template, error) {
+	if err := c.loadTemplate(); err != nil {
+		return nil, fmt.Errorf("failed to load template: %w", err)
+	}
+	tmpl, err := template.New("test-node.sh").Funcs(templates.FuncMap()).Parse(c.template)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse template: %w", err)
+	}
+	return tmpl, nil
 }
 
 func (c *CLI) readPackagesFromStdin() ([]string, error) {
@@ -185,7 +231,7 @@ func (c *CLI) loadTestDurations() error {
 			if errors.Is(err, fs.ErrNotExist) && path == c.JSONDir {
 				return fs.SkipAll // no previous results
 			}
-			log.Printf("Skipping %s: %v", path, err)
+			slog.Warn("Skipping unreadable path", "path", path, "err", err)
 			return nil
 		}
 		if d.IsDir() {
@@ -199,13 +245,13 @@ func (c *CLI) loadTestDurations() error {
 
 		data, err := parseJSONFile(path)
 		if err != nil {
-			log.Printf("Failed to read %s: %v", path, err)
+			slog.Warn("Failed to read test results", "path", path, "err", err)
 		}
 		files++
 		maps.Copy(c.testDurations, data)
 		return nil
 	})
-	log.Printf("Loaded %d testcases durations from %d files in %s", len(c.testDurations), files, c.JSONDir)
+	slog.Info("Loaded test durations", "tests", len(c.testDurations), "files", files, "dir", c.JSONDir)
 	return err
 }
 
@@ -218,8 +264,8 @@ func parseJSONFile(path string) (map[types.TestKey]time.Duration, error) {
 	return parser.ParseGoTestJSONL(fp)
 }
 
-// defaultDuration returns the duration assumed for tests without previous results.
-func (c *CLI) defaultDuration() time.Duration {
+// estimateDefaultDuration returns the duration assumed for tests without previous results.
+func (c *CLI) estimateDefaultDuration() time.Duration {
 	if c.DefaultDuration > 0 {
 		return c.DefaultDuration
 	}
@@ -235,24 +281,23 @@ func (c *CLI) defaultDuration() time.Duration {
 }
 
 func (c *CLI) createTestInfos() {
-	def := c.defaultDuration()
+	c.defaultDuration = c.estimateDefaultDuration()
 	c.testInfos = nil
 
-	pkgs := slices.Sorted(maps.Keys(c.testFunctions))
 	unknown := 0
-	for _, pkg := range pkgs {
+	for _, pkg := range slices.Sorted(maps.Keys(c.testFunctions)) {
 		for _, fn := range c.testFunctions[pkg] {
 			key := types.TestKey{Package: pkg, Function: fn}
 			duration, ok := c.testDurations[key]
 			if !ok {
-				duration = def
+				duration = c.defaultDuration
 				unknown++
 			}
-			c.testInfos = append(c.testInfos, types.TestInfo{TestKey: key, Duration: duration})
+			c.testInfos = append(c.testInfos, types.TestInfo{TestKey: key, Duration: duration, Known: ok})
 		}
 	}
 	if unknown > 0 {
-		log.Printf("%d of %d tests have no previous results, assuming %s each", unknown, len(c.testInfos), def)
+		slog.Info("Some tests have no previous results", "unknown", unknown, "total", len(c.testInfos), "assumed", c.defaultDuration)
 	}
 }
 
@@ -296,20 +341,19 @@ func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
 				Index:       len(lines) + 1,
 				Package:     pkg,
 				TestPattern: "^(" + strings.Join(chunk, "|") + ")$",
+				Functions:   chunk,
 			})
 		}
 	}
 	return lines
 }
 
-func (c *CLI) generateScriptFiles() error {
+func (c *CLI) generateScriptFiles(tmpl *template.Template) error {
 	if err := os.MkdirAll(c.ScriptsDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
-
-	tmpl, err := template.New("test-node.sh").Funcs(templates.FuncMap()).Parse(c.template)
-	if err != nil {
-		return fmt.Errorf("failed to parse template: %w", err)
+	if err := c.removeStaleScripts(); err != nil {
+		return err
 	}
 
 	binariesDir, err := filepath.Abs(c.BinariesDir)
@@ -327,7 +371,7 @@ func (c *CLI) generateScriptFiles() error {
 			numOfFuncs += len(funcs)
 		}
 		filename := filepath.Join(c.ScriptsDir, fmt.Sprintf("test-node-%d.sh", nt.NodeIndex))
-		log.Printf("Generating script: %v (TotalFuncs: %v, TotalDuration: %s)...", filename, numOfFuncs, nt.TotalDuration)
+		slog.Info("Generating script", "file", filename, "tests", numOfFuncs, "estimated", nt.TotalDuration)
 
 		data := types.TemplateData{
 			NodeIndex:   nt.NodeIndex,
@@ -341,6 +385,30 @@ func (c *CLI) generateScriptFiles() error {
 		if err := writeScript(filename, tmpl, data); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// removeStaleScripts removes scripts for node indexes which are no longer generated
+// (e.g. test-node-7.sh after reducing --nodes from 8 to 4).
+func (c *CLI) removeStaleScripts() error {
+	entries, err := os.ReadDir(c.ScriptsDir)
+	if err != nil {
+		return fmt.Errorf("failed to read scripts directory: %w", err)
+	}
+	for _, e := range entries {
+		m := scriptNameRe.FindStringSubmatch(e.Name())
+		if m == nil || e.IsDir() {
+			continue
+		}
+		if idx, err := strconv.Atoi(m[1]); err == nil && idx < c.Nodes {
+			continue
+		}
+		path := filepath.Join(c.ScriptsDir, e.Name())
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("failed to remove stale script %s: %w", path, err)
+		}
+		slog.Info("Removed stale script", "file", path)
 	}
 	return nil
 }

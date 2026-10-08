@@ -57,19 +57,19 @@ func TestCreateTestInfos(t *testing.T) {
 
 	// sorted by package, unknown tests get the median of known durations (0, 2s, 10s → 2s)
 	assert.Equal(t, []types.TestInfo{
-		{TestKey: key("pkg1", "TestA"), Duration: 10 * time.Second},
+		{TestKey: key("pkg1", "TestA"), Duration: 10 * time.Second, Known: true},
 		{TestKey: key("pkg1", "TestB"), Duration: 2 * time.Second},
-		{TestKey: key("pkg2", "TestC"), Duration: 0},
+		{TestKey: key("pkg2", "TestC"), Duration: 0, Known: true},
 		{TestKey: key("pkg2", "TestD"), Duration: 2 * time.Second},
 	}, cli.testInfos)
 }
 
 func TestDefaultDuration(t *testing.T) {
-	assert.Equal(t, fallbackDuration, (&CLI{}).defaultDuration())
+	assert.Equal(t, fallbackDuration, (&CLI{}).estimateDefaultDuration())
 	assert.Equal(t, 3*time.Second, (&CLI{
 		DefaultDuration: 3 * time.Second,
 		testDurations:   map[types.TestKey]time.Duration{key("p", "T"): time.Second},
-	}).defaultDuration())
+	}).estimateDefaultDuration())
 }
 
 func TestSplitTests(t *testing.T) {
@@ -124,14 +124,14 @@ func TestTestLines(t *testing.T) {
 		},
 	}
 	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "b", TestPattern: "^(TestB1)$"},
-		{Index: 2, Package: "a", TestPattern: "^(TestA1|TestA2|TestA3)$"},
+		{Index: 1, Package: "b", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
+		{Index: 2, Package: "a", TestPattern: "^(TestA1|TestA2|TestA3)$", Functions: []string{"TestA1", "TestA2", "TestA3"}},
 	}, (&CLI{}).testLines(nt))
 
 	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "b", TestPattern: "^(TestB1)$"},
-		{Index: 2, Package: "a", TestPattern: "^(TestA1|TestA2)$"},
-		{Index: 3, Package: "a", TestPattern: "^(TestA3)$"},
+		{Index: 1, Package: "b", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
+		{Index: 2, Package: "a", TestPattern: "^(TestA1|TestA2)$", Functions: []string{"TestA1", "TestA2"}},
+		{Index: 3, Package: "a", TestPattern: "^(TestA3)$", Functions: []string{"TestA3"}},
 	}, (&CLI{MaxFunctions: 2}).testLines(nt))
 }
 
@@ -155,8 +155,9 @@ func TestGenerateScriptFiles(t *testing.T) {
 			{NodeIndex: 2, Funcs: map[string][]string{}}, // more nodes than tests
 		},
 	}
-	require.NoError(t, cli.loadTemplate())
-	require.NoError(t, cli.generateScriptFiles())
+	tmpl, err := cli.parseTemplate()
+	require.NoError(t, err)
+	require.NoError(t, cli.generateScriptFiles(tmpl))
 
 	for i := range cli.Nodes {
 		scriptPath := filepath.Join(cli.ScriptsDir, "test-node-"+strconv.Itoa(i)+".sh")
@@ -192,10 +193,35 @@ func TestGenerateScriptFiles_CustomTemplate(t *testing.T) {
 			Funcs:    map[string][]string{"pkg": {"TestA", "TestB"}},
 		}},
 	}
-	require.NoError(t, cli.loadTemplate())
-	require.NoError(t, cli.generateScriptFiles())
+	tmpl, err := cli.parseTemplate()
+	require.NoError(t, err)
+	require.NoError(t, cli.generateScriptFiles(tmpl))
 
 	content, err := os.ReadFile(filepath.Join(cli.ScriptsDir, "test-node-0.sh"))
 	require.NoError(t, err)
 	assert.Equal(t, "0:-test.v -test.count=1\n1 'pkg' ^(TestA|TestB)$\n", string(content))
+}
+
+func TestGenerateScriptFiles_RemovesStaleScripts(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"test-node-0.sh", "test-node-1.sh", "test-node-7.sh", "test-node-x.sh", "other.sh"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("old"), 0o755))
+	}
+	cli := &CLI{
+		Nodes:       2,
+		Concurrency: 1,
+		ScriptsDir:  dir,
+		nodeTests:   []*types.NodeTest{{NodeIndex: 0}, {NodeIndex: 1}},
+	}
+	tmpl, err := cli.parseTemplate()
+	require.NoError(t, err)
+	require.NoError(t, cli.generateScriptFiles(tmpl))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.Equal(t, []string{"other.sh", "test-node-0.sh", "test-node-1.sh", "test-node-x.sh"}, names)
 }

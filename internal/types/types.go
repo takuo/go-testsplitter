@@ -15,6 +15,8 @@ type TestKey struct {
 type TestInfo struct {
 	TestKey
 	Duration time.Duration
+	// Known reports whether Duration comes from previous results.
+	Known bool
 }
 
 // NodeTest represents tests assigned to a specific node
@@ -46,4 +48,6 @@ type TestLine struct {
 	Index       int
 	Package     string
 	TestPattern string
+	// Functions is the test functions matched by TestPattern.
+	Functions []string
 }
