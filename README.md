@@ -46,6 +46,7 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
   | --default-duration=DURATION | 0 (median)          | Duration assumed for tests without previous results. 0 uses the median of known durations (5s if none) |  |
   | --seed=UINT                 | 1                   | Random seed for splitting. The same input and seed produce the same scripts  |                       |
   | --changed-since=REV         | (none)              | Run only tests of packages affected by changes since the merge base of REV and HEAD |                |
+  | --granularity=GRANULARITY   | package             | With `--changed-since`, select tests by affected packages (`package`) or by affected top-level declarations (`symbol`) |  |
   | --run-all-on=REGEX          | `(^\|/)go[.](mod\|sum\|work)$` | With `--changed-since`, run all tests if a changed file path (relative to the repository root) matches. `''` to disable |  |
   | --max-age=DURATION          | 0 (no limit)        | Ignore previous results older than this duration (e.g. `720h`)               |                       |
   | -p, --binaries-dir=DIR      | ./test-bin          | Path to test binaries, to output or pre-built                                | {{.BinariesDir}}      |
@@ -94,6 +95,18 @@ With `--changed-since REV`, only tests of packages affected by the changes since
 * Dependencies not visible in the import graph (e.g. files read by relative paths outside the package, external services) are not detected. Running all tests on the main branch is recommended
 * `--dry-run` and `--plan` show which packages are selected and why
 * The base revision must be fetched, e.g. `fetch-depth: 0` with `actions/checkout`
+
+#### `--granularity symbol`
+
+By default, all tests of affected packages are selected, so adding a constant to a package imported by almost every package selects almost all tests. With `--granularity symbol`, tests are selected by top-level declarations (functions, methods, types, constants and variables):
+
+* Changed declarations are found by comparing declarations in changed files at the merge base and now, ignoring comments and formatting. Moving a declaration between files is not a change
+* Test functions transitively referencing a changed declaration are selected (type-checked with `golang.org/x/tools/go/packages`), e.g. adding a constant selects no tests, and changing a constant selects only tests reaching code using it
+* A change of an exported method is treated as a change of its receiver type, since it may be called through interfaces of other packages or reflection. A change of an unexported method affects calls through interfaces of the same package
+* All tests of a package are selected if its `TestMain`, or the `main` function of a command (whose tests often run the built command), depends on a change
+* It falls back to selecting all tests of test binaries linking the package for changes which may affect a package beyond references: `init` functions, blank variables (`var _ = ...`), blank/dot imports, build constraints, cgo, `//go:linkname`, non-Go files (`testdata`, embedded files) and initialization depending on changed declarations
+* Tests are run only through references: e.g. tests running another command built with `go build`, or calling methods by name via reflection, may be missed
+* If the analysis fails (e.g. a type error), tests are selected by package
 
 ### Template variables
 
