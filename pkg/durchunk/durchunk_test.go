@@ -150,3 +150,45 @@ func TestSplitBalanced_InvalidChunkCount(t *testing.T) {
 	assert.Nil(t, SplitBalanced(maps.All(data), 0))
 	assert.Nil(t, SplitBalanced(maps.All(data), -1))
 }
+
+func TestSplitBalancedItems_GroupCost(t *testing.T) {
+	// Two packages with a large startup cost and four 1s tests each.
+	// Without group costs any split works, with them each package should stay in one chunk.
+	var items []Item[string]
+	for _, g := range []string{"p", "q"} {
+		for i := range 4 {
+			items = append(items, Item[string]{Key: fmt.Sprintf("%s%d", g, i), Duration: time.Second, Group: g})
+		}
+	}
+	cost := func(string) time.Duration { return 10 * time.Second }
+	chunks := SplitBalancedItems(items, 2, cost)
+	require.Len(t, chunks, 2)
+
+	for _, c := range chunks {
+		assert.Len(t, c.Keys, 4)
+		assert.Equal(t, c.Keys[0][:1], c.Keys[3][:1], "a group is kept together: %v", c.Keys)
+		assert.Equal(t, 14*time.Second, c.Total, "4 tests + 1 group cost")
+	}
+}
+
+func TestSplitBalancedItems_GroupCostTotals(t *testing.T) {
+	// A single long-running group must still be split when its tests dominate the cost.
+	var items []Item[string]
+	for i := range 4 {
+		items = append(items, Item[string]{Key: fmt.Sprintf("k%d", i), Duration: 10 * time.Second, Group: "p"})
+	}
+	chunks := SplitBalancedItems(items, 2, func(string) time.Duration { return time.Second })
+	require.Len(t, chunks, 2)
+	for _, c := range chunks {
+		assert.Len(t, c.Keys, 2)
+		assert.Equal(t, 21*time.Second, c.Total)
+	}
+}
+
+func TestSplitBalancedItems_NilCost(t *testing.T) {
+	items := []Item[string]{{Key: "a", Duration: time.Second, Group: "g"}, {Key: "b", Duration: time.Second, Group: "g"}}
+	chunks := SplitBalancedItems(items, 2, nil)
+	require.Len(t, chunks, 2)
+	assert.Equal(t, time.Second, chunks[0].Total)
+	assert.Equal(t, time.Second, chunks[1].Total)
+}

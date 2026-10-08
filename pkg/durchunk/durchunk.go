@@ -18,8 +18,18 @@ const DefaultIterations = 50000
 
 // Chunk chunk after balanced split
 type Chunk[K comparable] struct {
-	Keys  []K           `json:"keys"`
+	Keys []K `json:"keys"`
+	// Total is the sum of durations of Keys plus the costs of the groups in the chunk.
 	Total time.Duration `json:"total"`
+}
+
+// Item is a key with its duration, optionally belonging to a group.
+type Item[K comparable] struct {
+	Key      K
+	Duration time.Duration
+	// Group is the group of the item. Each chunk containing at least one item of a group
+	// pays the cost of the group once. Empty means no group.
+	Group string
 }
 
 type options struct {
@@ -40,18 +50,24 @@ func WithIterations(n int) Option {
 	return func(o *options) { o.iterations = n }
 }
 
-type entry[K comparable] struct {
-	key   K
-	dur   time.Duration
-	order int // position in the input sequence
-}
-
 // SplitBalanced splits key-durations into chunkCount chunks so that the largest chunk total
 // (the makespan) is minimized, and the chunk totals are as even as possible.
 //
 // The result is deterministic for the same input order and seed. Keys in each chunk keep the input order.
 // It returns nil if chunkCount < 1.
 func SplitBalanced[K comparable](data iter.Seq2[K, time.Duration], chunkCount int, opts ...Option) []Chunk[K] {
+	var items []Item[K]
+	for k, d := range data {
+		items = append(items, Item[K]{Key: k, Duration: d})
+	}
+	return SplitBalancedItems(items, chunkCount, nil, opts...)
+}
+
+// SplitBalancedItems is like SplitBalanced, but items can belong to groups with a fixed cost
+// (e.g. the startup cost of a process), which is added once to each chunk containing the group.
+// This favors keeping items of a costly group in the same chunk.
+// groupCost may be nil, which means all groups cost nothing.
+func SplitBalancedItems[K comparable](items []Item[K], chunkCount int, groupCost func(group string) time.Duration, opts ...Option) []Chunk[K] {
 	if chunkCount < 1 {
 		return nil
 	}
@@ -60,127 +76,182 @@ func SplitBalanced[K comparable](data iter.Seq2[K, time.Duration], chunkCount in
 		opt(&o)
 	}
 
-	var entries []entry[K]
-	for k, d := range data {
-		entries = append(entries, entry[K]{key: k, dur: max(d, 0), order: len(entries)})
-	}
-
-	assign, sums := greedyPartition(entries, chunkCount)
-	if chunkCount > 1 && len(entries) > 1 && o.iterations > 0 {
-		rng := rand.New(rand.NewPCG(o.seed, o.seed))
-		assign, sums = simulatedAnnealing(entries, assign, sums, o.iterations, rng)
+	s := newState(items, chunkCount, groupCost)
+	s.greedy()
+	if chunkCount > 1 && len(items) > 1 && o.iterations > 0 {
+		s.anneal(o.iterations, rand.New(rand.NewPCG(o.seed, o.seed)))
 	}
 
 	chunks := make([]Chunk[K], chunkCount)
-	for i, e := range entries {
-		c := assign[i]
-		chunks[c].Keys = append(chunks[c].Keys, e.key)
+	for i, it := range items {
+		c := s.best[i]
+		chunks[c].Keys = append(chunks[c].Keys, it.Key)
 	}
 	for i := range chunks {
-		chunks[i].Total = sums[i]
+		chunks[i].Total = s.bestSums[i]
 	}
 	return chunks
 }
 
-// greedyPartition assigns entries using the LPT (Longest Processing Time first) rule.
-// entries is sorted in place by input order on return.
-func greedyPartition[K comparable](entries []entry[K], m int) (assign []int, sums []time.Duration) {
-	slices.SortStableFunc(entries, func(a, b entry[K]) int {
-		return cmp.Compare(b.dur, a.dur)
-	})
-	byOrder := make([]int, len(entries))
-	sums = make([]time.Duration, m)
-	counts := make([]int, m)
-	for _, e := range entries {
-		best := 0
-		for i := 1; i < m; i++ {
-			// prefer fewer keys on ties so that zero-duration keys are spread too
-			if sums[i] < sums[best] || (sums[i] == sums[best] && counts[i] < counts[best]) {
-				best = i
-			}
-		}
-		byOrder[e.order] = best
-		sums[best] += e.dur
-		counts[best]++
-	}
-	slices.SortFunc(entries, func(a, b entry[K]) int { return cmp.Compare(a.order, b.order) })
-	return byOrder, sums
+type entry struct {
+	dur   time.Duration
+	group int // index into state.costs, -1 for no group
 }
 
-// simulatedAnnealing improves the assignment by moving or swapping entries between chunks.
-// Only the touched chunk sums are updated on each step.
-func simulatedAnnealing[K comparable](entries []entry[K], assign []int, sums []time.Duration, iterations int, rng *rand.Rand) ([]int, []time.Duration) {
-	m := len(sums)
-	n := len(entries)
+// state holds an assignment of entries to chunks. Chunk sums include group costs.
+type state struct {
+	entries []entry
+	costs   []time.Duration
+	m       int
 
+	assign []int
+	sums   []time.Duration
+	counts [][]int // [chunk][group] number of entries
+
+	best     []int
+	bestSums []time.Duration
+}
+
+func newState[K comparable](items []Item[K], m int, groupCost func(string) time.Duration) *state {
+	s := &state{m: m}
+	groups := make(map[string]int)
+	for _, it := range items {
+		g := -1
+		if it.Group != "" {
+			var ok bool
+			if g, ok = groups[it.Group]; !ok {
+				g = len(s.costs)
+				groups[it.Group] = g
+				var cost time.Duration
+				if groupCost != nil {
+					cost = max(groupCost(it.Group), 0)
+				}
+				s.costs = append(s.costs, cost)
+			}
+		}
+		s.entries = append(s.entries, entry{dur: max(it.Duration, 0), group: g})
+	}
+	s.assign = make([]int, len(s.entries))
+	s.sums = make([]time.Duration, m)
+	s.counts = make([][]int, m)
+	for i := range s.counts {
+		s.counts[i] = make([]int, len(s.costs))
+	}
+	return s
+}
+
+// addCost returns how much the sum of chunk c increases by adding entry i.
+func (s *state) addCost(i, c int) time.Duration {
+	e := s.entries[i]
+	if e.group >= 0 && s.counts[c][e.group] == 0 {
+		return e.dur + s.costs[e.group]
+	}
+	return e.dur
+}
+
+func (s *state) add(i, c int) {
+	s.sums[c] += s.addCost(i, c)
+	if g := s.entries[i].group; g >= 0 {
+		s.counts[c][g]++
+	}
+	s.assign[i] = c
+}
+
+func (s *state) remove(i, c int) {
+	e := s.entries[i]
+	s.sums[c] -= e.dur
+	if e.group >= 0 {
+		s.counts[c][e.group]--
+		if s.counts[c][e.group] == 0 {
+			s.sums[c] -= s.costs[e.group]
+		}
+	}
+}
+
+func (s *state) move(i, to int) {
+	s.remove(i, s.assign[i])
+	s.add(i, to)
+}
+
+// greedy assigns entries using the LPT (Longest Processing Time first) rule.
+func (s *state) greedy() {
+	order := make([]int, len(s.entries))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		return cmp.Compare(s.entries[b].dur, s.entries[a].dur)
+	})
+	sizes := make([]int, s.m)
+	for _, i := range order {
+		best := 0
+		for c := 1; c < s.m; c++ {
+			nc, nb := s.sums[c]+s.addCost(i, c), s.sums[best]+s.addCost(i, best)
+			// prefer fewer entries on ties so that zero-duration entries are spread too
+			if nc < nb || (nc == nb && sizes[c] < sizes[best]) {
+				best = c
+			}
+		}
+		s.add(i, best)
+		sizes[best]++
+	}
+	s.best = slices.Clone(s.assign)
+	s.bestSums = slices.Clone(s.sums)
+}
+
+// anneal improves the assignment by moving or swapping entries between chunks.
+func (s *state) anneal(iterations int, rng *rand.Rand) {
+	n := len(s.entries)
 	var total time.Duration
-	for _, s := range sums {
-		total += s
+	for _, sum := range s.sums {
+		total += sum
 	}
 	if total == 0 {
-		return assign, sums
+		return
 	}
 	// Temperatures are relative to the mean entry duration.
 	mean := float64(total) / float64(n)
 	tempStart, tempEnd := mean, mean*1e-4
 
-	cur := slices.Clone(assign)
-	curSums := slices.Clone(sums)
-	curScore := score(curSums)
-	best := slices.Clone(cur)
-	bestSums := slices.Clone(curSums)
+	curScore := score(s.sums)
 	bestScore := curScore
-
-	for i := range iterations {
-		t := tempStart * math.Pow(tempEnd/tempStart, float64(i)/float64(iterations))
+	for it := range iterations {
+		t := tempStart * math.Pow(tempEnd/tempStart, float64(it)/float64(iterations))
 
 		a := rng.IntN(n)
-		ca := cur[a]
-		var b, cb int
-		swap := rng.IntN(2) == 0
-		if swap {
+		ca := s.assign[a]
+		b, cb := -1, rng.IntN(s.m)
+		if rng.IntN(2) == 0 { // swap
 			b = rng.IntN(n)
-			cb = cur[b]
-		} else {
-			cb = rng.IntN(m)
+			cb = s.assign[b]
 		}
 		if ca == cb {
 			continue
 		}
 
-		// apply
-		curSums[ca] -= entries[a].dur
-		curSums[cb] += entries[a].dur
-		cur[a] = cb
-		if swap {
-			curSums[cb] -= entries[b].dur
-			curSums[ca] += entries[b].dur
-			cur[b] = ca
+		s.move(a, cb)
+		if b >= 0 {
+			s.move(b, ca)
 		}
 
-		nextScore := score(curSums)
+		nextScore := score(s.sums)
 		delta := nextScore - curScore
 		if delta <= 0 || rng.Float64() < math.Exp(-delta/t) {
 			curScore = nextScore
 			if curScore < bestScore {
 				bestScore = curScore
-				copy(best, cur)
-				copy(bestSums, curSums)
+				copy(s.best, s.assign)
+				copy(s.bestSums, s.sums)
 			}
 			continue
 		}
 
 		// revert
-		if swap {
-			curSums[ca] -= entries[b].dur
-			curSums[cb] += entries[b].dur
-			cur[b] = cb
+		if b >= 0 {
+			s.move(b, cb)
 		}
-		curSums[cb] -= entries[a].dur
-		curSums[ca] += entries[a].dur
-		cur[a] = ca
+		s.move(a, ca)
 	}
-	return best, bestSums
 }
 
 // score is primarily the makespan (max chunk total), with the spread (max - min) as a tie-breaker.
