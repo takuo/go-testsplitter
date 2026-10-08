@@ -77,11 +77,16 @@ func LoadDepGraph(patterns []string) (*DepGraph, error) {
 			continue
 		}
 		imp := stripTestVariant(p.ImportPath)
+		if p.ForTest != "" && strings.TrimSuffix(imp, "_test") == p.ForTest {
+			imp = p.ForTest // the package under test or its external test package
+		}
 		if p.Dir == "" {
 			continue
 		}
 		dir := realPath(p.Dir)
-		g.dirs[dir] = imp
+		if p.ForTest == "" {
+			g.dirs[dir] = imp
+		}
 		for _, f := range slices.Concat(p.EmbedFiles, p.TestEmbedFiles, p.XTestEmbedFiles) {
 			path := realPath(filepath.Join(p.Dir, f))
 			if !slices.Contains(g.files[path], imp) {
