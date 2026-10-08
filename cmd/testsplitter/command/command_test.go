@@ -127,6 +127,11 @@ func TestSplitTests_FunctionLevel(t *testing.T) {
 
 	assert.Len(t, slices.Collect(cli.nodeTests), 2, "Should create 2 nodes (0 origin)")
 
+	// deterministic
+	first := slices.Collect(cli.nodeTests)
+	cli.splitTests()
+	assert.Equal(t, first, slices.Collect(cli.nodeTests))
+
 	// 各関数がどこか1つのノードにしか割り当てられていないこと
 	funcSet := make(map[string]struct{})
 	for nt := range cli.nodeTests {
@@ -202,6 +207,7 @@ func TestGenerateScriptFiles(t *testing.T) {
 		nodeTests: slices.Values([]*types.NodeTest{
 			{
 				NodeIndex: 0,
+				Packages:  []string{"api/service/foo"},
 				Funcs: map[string][]string{
 					"api/service/foo": {"TestFoo", "TestBar"},
 				},
@@ -209,6 +215,7 @@ func TestGenerateScriptFiles(t *testing.T) {
 			},
 			{
 				NodeIndex: 1,
+				Packages:  []string{"api/service/bar"},
 				Funcs: map[string][]string{
 					"api/service/bar": {"TestBaz"},
 				},

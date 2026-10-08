@@ -36,6 +36,7 @@ type CLI struct {
 	JSONDir      string   `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
 	Template     string   `short:"t" long:"template" help:"Path to the template file (optional)"`
 	MaxFunctions int      `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per package (0: unlimited)"`
+	Seed         uint64   `long:"seed" default:"1" help:"Random seed for splitting (the same input and seed produce the same scripts)"`
 	TestFlags    []string `arg:"" help:"Flags to pass to the test binary after --" optional:""`
 
 	BinariesDir      string `short:"p" long:"binaries-dir" default:"./test-bin" help:"Directory to output or containing test binaries"`
@@ -185,8 +186,8 @@ func (c *CLI) loadTestDurations() (err error) {
 func (c *CLI) createTestInfos() {
 	c.testInfos = []types.TestInfo{}
 
-	for pkg, functions := range c.testFunctions {
-		for _, fn := range functions {
+	for _, pkg := range slices.Sorted(maps.Keys(c.testFunctions)) {
+		for _, fn := range c.testFunctions[pkg] {
 			key := fmt.Sprintf("%s:%s", pkg, fn)
 			duration := c.testDurations[key]
 			if duration == 0 {
@@ -213,7 +214,7 @@ func (c *CLI) splitTests() {
 			}
 		}
 	}
-	chunks := durchunk.SplitBalanced(dataSeq, c.Nodes)
+	chunks := durchunk.SplitBalanced(dataSeq, c.Nodes, durchunk.WithSeed(c.Seed))
 	c.nodeTests = func(yield func(*types.NodeTest) bool) {
 		for i, chunk := range chunks {
 			nt := &types.NodeTest{
@@ -225,6 +226,9 @@ func (c *CLI) splitTests() {
 			for _, key := range chunk.Keys {
 				s := strings.Index(key, ":")
 				pkg, fn := key[:s], key[s+1:]
+				if _, ok := nt.Funcs[pkg]; !ok {
+					nt.Packages = append(nt.Packages, pkg)
+				}
 				nt.Funcs[pkg] = append(nt.Funcs[pkg], fn)
 			}
 			if !yield(nt) {
@@ -262,7 +266,8 @@ func (c *CLI) generateScriptFiles() error {
 
 		// Prepare template data
 		linesSeq := func(yield func(tl types.TestLine) bool) {
-			for pkg, funcs := range nt.Funcs {
+			for _, pkg := range nt.Packages {
+				funcs := nt.Funcs[pkg]
 				if c.MaxFunctions > 0 {
 					for funcs := range slices.Chunk(funcs, c.MaxFunctions) {
 						if !yield(types.TestLine{

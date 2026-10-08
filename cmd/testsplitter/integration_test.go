@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,92 +11,74 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gotest.tools/v3/golden"
 )
+
+var update = flag.Bool("update", false, "update golden files")
+
+// buildBinary builds testsplitter into a temporary directory.
+func buildBinary(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "testsplitter")
+	out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput()
+	require.NoError(t, err, "Failed to build testsplitter: %s", out)
+	return binary
+}
+
+func testdataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs("testdata")
+	require.NoError(t, err)
+	return dir
+}
+
+func runSplitter(t *testing.T, binary, dir, stdin string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(binary, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "testsplitter should run successfully. Output: %s", output)
+	return string(output)
+}
+
+// assertGolden compares content with the golden file, after replacing the environment dependent directory.
+func assertGolden(t *testing.T, content, baseDir, goldenFile string) {
+	t.Helper()
+	content = strings.ReplaceAll(content, baseDir, "@TESTDATA@")
+	if *update {
+		require.NoError(t, os.WriteFile(goldenFile, []byte(content), 0o644))
+	}
+	want, err := os.ReadFile(goldenFile)
+	require.NoError(t, err, "run 'go test . -update' to create golden files")
+	assert.Equal(t, string(want), content, "run 'go test . -update' to update golden files")
+}
 
 func TestMainIntegration(t *testing.T) {
 	const nodes = 2
+	binary := buildBinary(t)
+	dir := testdataDir(t)
+	goldenDir := filepath.Join(dir, "golden")
 
-	cur, err := os.Getwd()
-	require.NoError(t, err, "Should be able to get current directory")
-
-	testdataDir := filepath.Join(cur, "testdata")
-	// t.Chdir(testdataDir)
-
-	// Build the testsplitter binary
-	binary := filepath.Join(cur, "testsplitter")
-	cmd := exec.Command("go", "build", "-o", binary, filepath.Join(cur, "main.go"))
-	cmd.Dir = cur
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("Failed to build testsplitter: %v", err)
+	// Relative directories and import paths produce the same scripts
+	inputs := map[string]string{
+		"directories": "example/pkg1\nexample/pkg2\nexample/pkg3\n",
+		"import paths": "github.com/takuo/go-testsplitter/cmd/testsplitter/testdata/example/pkg1\n" +
+			"github.com/takuo/go-testsplitter/cmd/testsplitter/testdata/example/pkg2\n" +
+			"github.com/takuo/go-testsplitter/cmd/testsplitter/testdata/example/pkg3\n",
 	}
-	defer os.Remove(binary)
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			output := runSplitter(t, binary, dir, input,
+				"-d", "-n", strconv.Itoa(nodes), "-o", outputDir, "--", "-test.timeout=20m", "-test.v")
+			assert.Contains(t, output, "Loaded 9 testcases durations from 3 files in ./test-json")
 
-	// Prepare test input
-	input := "example/pkg1\nexample/pkg2\nexample/pkg3"
-	outputDir := t.TempDir()
-	goldenDir := filepath.Join(cur, "testdata", "golden")
-
-	// Run testsplitter
-	cmd = exec.Command(binary, "-d", "-n", strconv.Itoa(nodes), "-o", outputDir, "--", "-test.timeout=20m", "-test.v")
-	cmd.Stdin = strings.NewReader(input)
-	cmd.Dir = testdataDir
-
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "testsplitter should run successfully. Output: %s", output)
-
-	// Check that output files were created
-	for i := range nodes {
-		outputFile := filepath.Join(outputDir, "test-node-"+strconv.Itoa(i)+".sh")
-		goldenFile := filepath.Join(goldenDir, "test-node-"+strconv.Itoa(i)+".sh.golden")
-		assert.FileExists(t, outputFile, "Output file should be created")
-		b, err := os.ReadFile(outputFile)
-		require.NoError(t, err)
-		golden.Assert(t, string(b), goldenFile)
-	}
-}
-
-func TestWithPreviousResults(t *testing.T) {
-	const nodes = 3
-
-	cur, err := os.Getwd()
-	require.NoError(t, err, "Should be able to get current directory")
-
-	testdataDir := filepath.Join(cur, "testdata")
-
-	// Build the testsplitter binary
-	binary := filepath.Join(cur, "testsplitter")
-	cmd := exec.Command("go", "build", "-o", binary, filepath.Join(cur, "main.go"))
-	cmd.Dir = cur
-	err = cmd.Run()
-	require.NoError(t, err, "Should be able to build testsplitter")
-	defer os.Remove(binary)
-
-	// Prepare test input (using testdata paths)
-	input := "example/pkg1\nexample/pkg2\nexample/pkg3"
-	outputDir := t.TempDir()
-
-	// Run testsplitter with test-reports available
-	cmd = exec.Command(binary, "-d", "-n", strconv.Itoa(nodes), "-o", outputDir, "--", "-test.timeout=30m", "-test.v")
-	cmd.Stdin = strings.NewReader(input)
-	cmd.Dir = testdataDir
-
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "testsplitter should run successfully. Output: %s", output)
-	assert.Contains(t, string(output), "Loaded 9 testcases durations from 3 files in ./test-json", "Should load previous test durations")
-	t.Log(string(output))
-
-	// Check that output files were created
-	for i := range nodes {
-		outputFile := filepath.Join(outputDir, "test-node-"+strconv.Itoa(i)+".sh")
-		assert.FileExists(t, outputFile, "Output file should be created")
-
-		// Check that the file contains expected content
-		content, err := os.ReadFile(outputFile)
-		require.NoError(t, err, "Should be able to read output file")
-
-		contentStr := string(content)
-		assert.Contains(t, contentStr, "#!/bin/bash", "File should contain bash shebang")
-		assert.Contains(t, contentStr, "set -e", "File should contain set -e")
+			for i := range nodes {
+				name := "test-node-" + strconv.Itoa(i) + ".sh"
+				b, err := os.ReadFile(filepath.Join(outputDir, name))
+				require.NoError(t, err, "Output file should be created")
+				assertGolden(t, string(b), dir, filepath.Join(goldenDir, name+".golden"))
+			}
+		})
 	}
 }

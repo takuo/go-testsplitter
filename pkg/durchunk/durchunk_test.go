@@ -1,6 +1,7 @@
 package durchunk
 
 import (
+	"fmt"
 	"maps"
 	"testing"
 	"time"
@@ -106,4 +107,24 @@ func TestSplitBalanced_ChunkCountExceedsKeys(t *testing.T) {
 		keyCount += len(c.Keys)
 	}
 	assert.Equal(t, 2, keyCount, "total key count mismatch")
+}
+
+func TestSplitBalanced_Deterministic(t *testing.T) {
+	keys := make([]string, 200)
+	durs := make([]time.Duration, 200)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("k%03d", i)
+		durs[i] = time.Duration((i*7919)%100+1) * time.Second
+	}
+	seq := func(yield func(string, time.Duration) bool) {
+		for i := range keys {
+			if !yield(keys[i], durs[i]) {
+				return
+			}
+		}
+	}
+	first := SplitBalanced(seq, 4)
+	for range 3 {
+		assert.Equal(t, first, SplitBalanced(seq, 4))
+	}
 }

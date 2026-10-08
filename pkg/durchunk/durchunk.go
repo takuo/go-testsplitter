@@ -4,9 +4,24 @@ package durchunk
 import (
 	"iter"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
+
+// DefaultSeed is the random seed used when WithSeed is not given.
+const DefaultSeed uint64 = 1
+
+type options struct {
+	seed uint64
+}
+
+// Option configures SplitBalanced.
+type Option func(*options)
+
+// WithSeed sets the random seed. The same input and seed always produce the same result.
+func WithSeed(seed uint64) Option {
+	return func(o *options) { o.seed = seed }
+}
 
 // Chunk chunk after balanced split
 type Chunk struct {
@@ -22,7 +37,14 @@ type entry struct {
 // SplitBalanced は map[string]time.Duration を指定したチャンク数に分割します。
 // - 合計時間を均等化
 // - 要素数に制約なし（最低1個以上）
-func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int) []Chunk {
+// - 同じ入力順序とシードなら常に同じ結果
+func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int, opts ...Option) []Chunk {
+	o := options{seed: DefaultSeed}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	rng := rand.New(rand.NewPCG(o.seed, o.seed))
+
 	entries := []entry{}
 	globalDurMap := make(map[string]int64)
 	for k, v := range data {
@@ -31,8 +53,8 @@ func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int) []Chun
 		entries = append(entries, entry{Key: k, Dur: sec})
 	}
 
-	chunks := greedyPartition(entries, chunkCount)
-	chunks = simulatedAnnealing(chunks, 50000, 1000.0, 0.01, globalDurMap)
+	chunks := greedyPartition(entries, chunkCount, rng)
+	chunks = simulatedAnnealing(chunks, 50000, 1000.0, 0.01, globalDurMap, rng)
 
 	for i := range chunks {
 		totalSec := int64(0)
@@ -48,8 +70,8 @@ func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int) []Chun
 // --------------------
 // 内部関数
 // --------------------
-func greedyPartition(entries []entry, m int) []Chunk {
-	rand.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
+func greedyPartition(entries []entry, m int, rng *rand.Rand) []Chunk {
+	rng.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
 
 	chunks := make([]Chunk, m)
 	sums := make([]int64, m)
@@ -67,7 +89,7 @@ func greedyPartition(entries []entry, m int) []Chunk {
 	return chunks
 }
 
-func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float64, durMap map[string]int64) []Chunk {
+func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float64, durMap map[string]int64, rng *rand.Rand) []Chunk {
 	best := copyChunks(chunks)
 	bestScore := score(best)
 	current := copyChunks(chunks)
@@ -77,27 +99,27 @@ func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float
 		t := tempStart * math.Pow(tempEnd/tempStart, float64(i)/float64(iterations))
 		next := copyChunks(current)
 
-		if rand.Float64() < 0.5 {
-			from := rand.Intn(len(next))
+		if rng.Float64() < 0.5 {
+			from := rng.IntN(len(next))
 			if len(next[from].Keys) == 0 {
 				continue
 			}
-			to := rand.Intn(len(next))
+			to := rng.IntN(len(next))
 			if from == to {
 				continue
 			}
-			idx := rand.Intn(len(next[from].Keys))
+			idx := rng.IntN(len(next[from].Keys))
 			val := next[from].Keys[idx]
 			next[from].Keys = append(next[from].Keys[:idx], next[from].Keys[idx+1:]...)
 			next[to].Keys = append(next[to].Keys, val)
 		} else {
-			a := rand.Intn(len(next))
-			b := rand.Intn(len(next))
+			a := rng.IntN(len(next))
+			b := rng.IntN(len(next))
 			if a == b || len(next[a].Keys) == 0 || len(next[b].Keys) == 0 {
 				continue
 			}
-			ia := rand.Intn(len(next[a].Keys))
-			ib := rand.Intn(len(next[b].Keys))
+			ia := rng.IntN(len(next[a].Keys))
+			ib := rng.IntN(len(next[b].Keys))
 			next[a].Keys[ia], next[b].Keys[ib] = next[b].Keys[ib], next[a].Keys[ia]
 		}
 
@@ -111,7 +133,7 @@ func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float
 
 		nextScore := score(next)
 		delta := float64(nextScore - currentScore)
-		if delta < 0 || rand.Float64() < math.Exp(-delta/t) {
+		if delta < 0 || rng.Float64() < math.Exp(-delta/t) {
 			current = next
 			currentScore = nextScore
 		}

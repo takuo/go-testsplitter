@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -49,6 +50,7 @@ func ScanTestFunctions(packages []string) (funcs map[string][]string, err error)
 		}
 
 		if len(functions) > 0 {
+			slices.Sort(functions)
 			funcs[pkg] = functions
 			log.Printf("Found %d test functions in package %s", len(functions), pkg)
 		} else {

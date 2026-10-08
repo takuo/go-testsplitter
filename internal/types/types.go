@@ -50,8 +50,11 @@ type TestInfo struct {
 type NodeTest struct {
 	NodeIndex     int
 	TotalDuration time.Duration
-	Funcs         map[string][]string
-	Flags         string
+	// Packages is the list of packages in deterministic order.
+	Packages []string
+	// Funcs maps package to its test functions.
+	Funcs map[string][]string
+	Flags string
 }
 
 // TemplateData represents data for the script template
