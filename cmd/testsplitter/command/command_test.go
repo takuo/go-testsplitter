@@ -155,20 +155,30 @@ func TestTestLines(t *testing.T) {
 	nt := &types.NodeTest{
 		Packages: []string{"b", "a"},
 		Funcs: map[string][]string{
-			"a": {"TestA1", "TestA2", "TestA3"},
+			"a": {"TestA1", "TestA2", "TestA3", "TestA4"},
 			"b": {"TestB1"},
 		},
 	}
-	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
-		{Index: 2, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2|TestA3)$", Functions: []string{"TestA1", "TestA2", "TestA3"}},
-	}, (&CLI{}).testLines(nt))
+	cli := &CLI{testDurations: map[types.TestKey]time.Duration{
+		key("a", "TestA1"): 1 * time.Second,
+		key("a", "TestA2"): 2 * time.Second,
+		key("a", "TestA3"): 3 * time.Second,
+		key("a", "TestA4"): 4 * time.Second,
+		key("b", "TestB1"): 5 * time.Second,
+	}}
 
+	// longest first
 	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
-		{Index: 2, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2)$", Functions: []string{"TestA1", "TestA2"}},
-		{Index: 3, Package: "a", Binary: "a.test", TestPattern: "^(TestA3)$", Functions: []string{"TestA3"}},
-	}, (&CLI{MaxFunctions: 2}).testLines(nt))
+		{Index: 1, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2|TestA3|TestA4)$", Functions: []string{"TestA1", "TestA2", "TestA3", "TestA4"}, Estimated: 10 * time.Second},
+		{Index: 2, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}, Estimated: 5 * time.Second},
+	}, cli.testLines(nt))
+
+	cli.MaxFunctions = 2
+	assert.Equal(t, []types.TestLine{
+		{Index: 1, Package: "a", Binary: "a.test", TestPattern: "^(TestA3|TestA4)$", Functions: []string{"TestA3", "TestA4"}, Estimated: 7 * time.Second},
+		{Index: 2, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}, Estimated: 5 * time.Second},
+		{Index: 3, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2)$", Functions: []string{"TestA1", "TestA2"}, Estimated: 3 * time.Second},
+	}, cli.testLines(nt))
 }
 
 func TestGenerateScriptFiles(t *testing.T) {

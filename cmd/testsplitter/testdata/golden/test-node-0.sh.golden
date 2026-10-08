@@ -35,9 +35,9 @@ export -f run_test
 
 # INDEX PACKAGE_DIR BINARY TEST_PATTERN
 TESTS=(
-  1 'example/pkg1' 'example.pkg1.test' '^(TestAddNegative)$'
-  2 'example/pkg2' 'example.pkg2.test' '^(TestToUpper)$'
-  3 'example/pkg3' 'example.pkg3.test' '^(TestAbs|TestMax|TestMaxEqual)$'
+  1 'example/pkg3' 'example.pkg3.test' '^(TestAbs|TestMax|TestMaxEqual)$'
+  2 'example/pkg1' 'example.pkg1.test' '^(TestAddNegative)$'
+  3 'example/pkg2' 'example.pkg2.test' '^(TestToUpper)$'
 )
 
 status=0

@@ -3,6 +3,7 @@ package command
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -357,6 +358,8 @@ func (c *CLI) splitTests() {
 	}
 }
 
+// testLines returns test process invocations of the node, longest first so that
+// long processes do not start last when running in parallel.
 func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
 	var lines []types.TestLine
 	for _, pkg := range nt.Packages {
@@ -366,16 +369,32 @@ func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
 			size = len(funcs)
 		}
 		for chunk := range slices.Chunk(funcs, size) {
+			var estimated time.Duration
+			for _, fn := range chunk {
+				estimated += c.testDuration(types.TestKey{Package: pkg, Function: fn})
+			}
 			lines = append(lines, types.TestLine{
-				Index:       len(lines) + 1,
 				Package:     pkg,
 				Binary:      binaryName(pkg),
 				TestPattern: "^(" + strings.Join(chunk, "|") + ")$",
 				Functions:   chunk,
+				Estimated:   estimated,
 			})
 		}
 	}
+	slices.SortStableFunc(lines, func(a, b types.TestLine) int { return cmp.Compare(b.Estimated, a.Estimated) })
+	for i := range lines {
+		lines[i].Index = i + 1
+	}
 	return lines
+}
+
+// testDuration returns the estimated duration of the test.
+func (c *CLI) testDuration(key types.TestKey) time.Duration {
+	if d, ok := c.testDurations[key]; ok {
+		return d
+	}
+	return c.defaultDuration
 }
 
 func (c *CLI) generateScriptFiles(tmpl *template.Template) error {
