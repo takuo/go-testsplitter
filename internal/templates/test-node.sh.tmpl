@@ -33,7 +33,7 @@ run_test() {
 }
 export -f run_test
 
-# INDEX PACKAGE_DIR BINARY TEST_PATTERN
+# INDEX PACKAGE_DIR BINARY TEST_PATTERN (longest first)
 TESTS=(
 {{- range .TestLines}}
   {{.Index}} {{shquote .Package}} {{shquote .Binary}} {{shquote .TestPattern}}
