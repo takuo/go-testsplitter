@@ -3,6 +3,7 @@ package command
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -88,12 +89,12 @@ func (c *CLI) Validate() error {
 }
 
 // Run run the command line
-func (c *CLI) Run() error {
+func (c *CLI) Run(ctx context.Context) error {
 	if err := c.listPackages(); err != nil {
 		return err
 	}
 	if !c.DisableBuild {
-		if err := c.buildTestBinaries(); err != nil {
+		if err := c.buildTestBinaries(ctx); err != nil {
 			return fmt.Errorf("failed to build test binaries: %w", err)
 		}
 	}
@@ -374,29 +375,30 @@ func binaryName(dir string) string {
 }
 
 // buildTestBinaries builds test binaries for all target packages into the binaries directory.
-func (c *CLI) buildTestBinaries() error {
-	log.Printf("Building test binaries for %d packages with concurrency %d.\n", len(c.packages), c.BuildConcurrency)
-	p := pool.New().WithErrors().WithMaxGoroutines(c.BuildConcurrency)
+// It stops building remaining packages on the first failure.
+func (c *CLI) buildTestBinaries(ctx context.Context) error {
+	log.Printf("Building test binaries for %d packages with concurrency %d.", len(c.packages), c.BuildConcurrency)
 
-	outputPath, err := filepath.Abs(c.BinariesDir)
+	outputDir, err := filepath.Abs(c.BinariesDir)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute output path: %w", err)
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current working directory: %w", err)
-	}
+
+	p := pool.New().WithMaxGoroutines(c.BuildConcurrency).WithContext(ctx).WithCancelOnError().WithFirstError()
 	for _, pkg := range c.packages {
-		p.Go(func() error {
-			outputPath := filepath.Join(outputPath, binaryName(pkg.Dir))
-			log.Printf("Building %s as %s...\n", pkg.Dir, outputPath)
-			cmd := exec.Command("go", "test", "-c", "-o", outputPath, ".")
-			cmd.Dir = filepath.Join(cwd, pkg.Dir)
-			output, err := cmd.CombinedOutput()
-			if len(output) > 0 {
-				fmt.Println(string(output))
+		p.Go(func(ctx context.Context) error {
+			output := filepath.Join(outputDir, binaryName(pkg.Dir))
+			log.Printf("Building %s as %s...", pkg.Dir, output)
+			cmd := exec.CommandContext(ctx, "go", "test", "-c", "-o", output, ".")
+			cmd.Dir = pkg.Dir
+			out, err := cmd.CombinedOutput()
+			if len(out) > 0 {
+				log.Printf("go test -c %s:\n%s", pkg.Dir, out)
 			}
-			return err
+			if err != nil {
+				return fmt.Errorf("build %s: %w", pkg.Dir, err)
+			}
+			return nil
 		})
 	}
 	return p.Wait()

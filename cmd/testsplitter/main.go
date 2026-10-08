@@ -2,10 +2,10 @@
 package main
 
 import (
-	_ "embed"
+	"context"
 	"fmt"
-	"log"
 	"os"
+	"os/signal"
 
 	"github.com/alecthomas/kong"
 
@@ -13,17 +13,16 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	cli := &command.CLI{}
-	parser := kong.Must(cli, &kong.Vars{"version": fmt.Sprintf("testsplitter: %s", command.Version())},
+	kctx := kong.Parse(cli,
+		kong.Vars{"version": fmt.Sprintf("testsplitter: %s", command.Version())},
 		kong.Name("testsplitter"),
 		kong.Description("Split Go tests across multiple nodes."),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
+		kong.BindTo(ctx, (*context.Context)(nil)),
 	)
-	ctx, err := parser.Parse(os.Args[1:])
-	if err != nil {
-		log.Fatalf("Failed to parse arguments: %v", err)
-	}
-	if err := ctx.Run(); err != nil {
-		log.Fatal(err)
-	}
+	kctx.FatalIfErrorf(kctx.Run())
 }
