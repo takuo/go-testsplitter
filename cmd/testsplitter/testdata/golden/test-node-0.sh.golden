@@ -7,12 +7,11 @@ export JSON_DIR='@TESTDATA@/test-json'
 export REPORT_DIR="${CWD}/test-reports"
 mkdir -p "$JSON_DIR" "$REPORT_DIR"
 
-export PATH='@TESTDATA@/test-bin':"$PATH"
+export BINARIES_DIR='@TESTDATA@/test-bin'
 
-# run_test INDEX PACKAGE_DIR TEST_PATTERN
+# run_test INDEX PACKAGE_DIR BINARY TEST_PATTERN
 run_test() {
-  local count="$1" pkg="$2" pattern="$3"
-  local bin="${pkg//\//.}.test"
+  local count="$1" pkg="$2" bin="${BINARIES_DIR}/$3" pattern="$4"
   local json="${JSON_DIR}/test-0-${count}.jsonl"
   local report="${REPORT_DIR}/junit-0-${count}.xml"
   local flags=('-test.timeout=20m' '-test.v' )
@@ -29,16 +28,16 @@ run_test() {
 }
 export -f run_test
 
-# INDEX PACKAGE_DIR TEST_PATTERN
+# INDEX PACKAGE_DIR BINARY TEST_PATTERN
 TESTS=(
-  1 'example/pkg1' '^(TestAddNegative)$'
-  2 'example/pkg2' '^(TestToUpper)$'
-  3 'example/pkg3' '^(TestAbs|TestMax|TestMaxEqual)$'
+  1 'example/pkg1' 'example.pkg1.test' '^(TestAddNegative)$'
+  2 'example/pkg2' 'example.pkg2.test' '^(TestToUpper)$'
+  3 'example/pkg3' 'example.pkg3.test' '^(TestAbs|TestMax|TestMaxEqual)$'
 )
 
 status=0
 if (( ${#TESTS[@]} > 0 )); then
-  printf '%s\0' "${TESTS[@]}" | xargs -0 -n 3 -P 4 bash -c 'run_test "$@"' _ || status=$?
+  printf '%s\0' "${TESTS[@]}" | xargs -0 -n 4 -P 4 bash -c 'run_test "$@"' _ || status=$?
 fi
 
 # Merge JSON results even if some tests failed

@@ -124,14 +124,14 @@ func TestTestLines(t *testing.T) {
 		},
 	}
 	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "b", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
-		{Index: 2, Package: "a", TestPattern: "^(TestA1|TestA2|TestA3)$", Functions: []string{"TestA1", "TestA2", "TestA3"}},
+		{Index: 1, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
+		{Index: 2, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2|TestA3)$", Functions: []string{"TestA1", "TestA2", "TestA3"}},
 	}, (&CLI{}).testLines(nt))
 
 	assert.Equal(t, []types.TestLine{
-		{Index: 1, Package: "b", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
-		{Index: 2, Package: "a", TestPattern: "^(TestA1|TestA2)$", Functions: []string{"TestA1", "TestA2"}},
-		{Index: 3, Package: "a", TestPattern: "^(TestA3)$", Functions: []string{"TestA3"}},
+		{Index: 1, Package: "b", Binary: "b.test", TestPattern: "^(TestB1)$", Functions: []string{"TestB1"}},
+		{Index: 2, Package: "a", Binary: "a.test", TestPattern: "^(TestA1|TestA2)$", Functions: []string{"TestA1", "TestA2"}},
+		{Index: 3, Package: "a", Binary: "a.test", TestPattern: "^(TestA3)$", Functions: []string{"TestA3"}},
 	}, (&CLI{MaxFunctions: 2}).testLines(nt))
 }
 

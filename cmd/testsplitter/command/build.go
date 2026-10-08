@@ -14,10 +14,21 @@ import (
 	"github.com/takuo/go-testsplitter/internal/scanner"
 )
 
-// binaryName returns the test binary name for the package directory.
-// e.g. api/service/foo → api.service.foo.test
+// binaryEscaper escapes characters in a path element so that elements can be joined with ".".
+var binaryEscaper = strings.NewReplacer("%", "%25", ".", "%2E")
+
+// binaryName returns the test binary name for the package directory, unique for each directory.
+// Path elements are joined with "." after escaping "%" and "." in them.
+//
+//	api/service/foo → api.service.foo.test
+//	api/v1.2        → api.v1%2E2.test
+//	.               → %2E.test
 func binaryName(dir string) string {
-	return strings.ReplaceAll(dir, "/", ".") + ".test"
+	elems := strings.Split(dir, "/")
+	for i, e := range elems {
+		elems[i] = binaryEscaper.Replace(e)
+	}
+	return strings.Join(elems, ".") + ".test"
 }
 
 // goTestExecName returns the file name `go test -c -o DIR/` writes for the import path:

@@ -340,6 +340,7 @@ func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
 			lines = append(lines, types.TestLine{
 				Index:       len(lines) + 1,
 				Package:     pkg,
+				Binary:      binaryName(pkg),
 				TestPattern: "^(" + strings.Join(chunk, "|") + ")$",
 				Functions:   chunk,
 			})

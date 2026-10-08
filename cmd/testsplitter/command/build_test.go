@@ -41,5 +41,20 @@ func TestBuildBatches(t *testing.T) {
 }
 
 func TestBinaryName(t *testing.T) {
-	assert.Equal(t, "api.service.foo.test", binaryName("api/service/foo"))
+	cases := map[string]string{
+		"api/service/foo": "api.service.foo.test",
+		"foo":             "foo.test",
+		"a/b.c":           "a.b%2Ec.test",
+		"a.b/c":           "a%2Eb.c.test",
+		"a%2Eb/c":         "a%252Eb.c.test",
+		".":               "%2E.test",
+		"../x":            "%2E%2E.x.test",
+	}
+	seen := make(map[string]string)
+	for in, want := range cases {
+		got := binaryName(in)
+		assert.Equal(t, want, got, in)
+		assert.NotContains(t, seen, got, "collision: %s and %s", in, seen[got])
+		seen[got] = in
+	}
 }

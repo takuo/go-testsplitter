@@ -7,12 +7,11 @@ export JSON_DIR={{shquote .JSONDir}}
 export REPORT_DIR="${CWD}/test-reports"
 mkdir -p "$JSON_DIR" "$REPORT_DIR"
 
-export PATH={{shquote .BinariesDir}}:"$PATH"
+export BINARIES_DIR={{shquote .BinariesDir}}
 
-# run_test INDEX PACKAGE_DIR TEST_PATTERN
+# run_test INDEX PACKAGE_DIR BINARY TEST_PATTERN
 run_test() {
-  local count="$1" pkg="$2" pattern="$3"
-  local bin="${pkg//\//.}.test"
+  local count="$1" pkg="$2" bin="${BINARIES_DIR}/$3" pattern="$4"
   local json="${JSON_DIR}/test-{{.NodeIndex}}-${count}.jsonl"
   local report="${REPORT_DIR}/junit-{{.NodeIndex}}-${count}.xml"
   local flags=({{range .TestFlags}}{{shquote .}} {{end}})
@@ -29,16 +28,16 @@ run_test() {
 }
 export -f run_test
 
-# INDEX PACKAGE_DIR TEST_PATTERN
+# INDEX PACKAGE_DIR BINARY TEST_PATTERN
 TESTS=(
 {{- range .TestLines}}
-  {{.Index}} {{shquote .Package}} {{shquote .TestPattern}}
+  {{.Index}} {{shquote .Package}} {{shquote .Binary}} {{shquote .TestPattern}}
 {{- end}}
 )
 
 status=0
 if (( ${#TESTS[@]} > 0 )); then
-  printf '%s\0' "${TESTS[@]}" | xargs -0 -n 3 -P {{.Concurrency}} bash -c 'run_test "$@"' _ || status=$?
+  printf '%s\0' "${TESTS[@]}" | xargs -0 -n 4 -P {{.Concurrency}} bash -c 'run_test "$@"' _ || status=$?
 fi
 
 # Merge JSON results even if some tests failed

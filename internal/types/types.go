@@ -45,8 +45,10 @@ type TemplateData struct {
 // TestLine represents a single test process invocation in the test script
 type TestLine struct {
 	// Index is the 1-origin sequence number in the node.
-	Index       int
-	Package     string
+	Index   int
+	Package string
+	// Binary is the file name of the test binary in BinariesDir.
+	Binary      string
 	TestPattern string
 	// Functions is the test functions matched by TestPattern.
 	Functions []string

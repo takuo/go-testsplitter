@@ -227,7 +227,7 @@ func TestBuildCollidingNames(t *testing.T) {
 
 	runSplitter(t, binary, work, "", "-s", "-n", "1")
 
-	for bin, test := range map[string]string{"a.x.test": "TestA", "b.x.test": "TestB", "..test": "TestRoot"} {
+	for bin, test := range map[string]string{"a.x.test": "TestA", "b.x.test": "TestB", "%2E.test": "TestRoot"} {
 		out, err := exec.Command(filepath.Join(work, "test-bin", bin), "-test.list", ".").CombinedOutput()
 		require.NoError(t, err, "%s: %s", bin, out)
 		assert.Equal(t, test+"\n", string(out), bin)
