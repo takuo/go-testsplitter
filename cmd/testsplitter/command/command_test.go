@@ -1,6 +1,8 @@
 package command
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -287,4 +289,27 @@ func TestGenerateScriptFiles_RemovesStaleScripts(t *testing.T) {
 		names = append(names, e.Name())
 	}
 	assert.Equal(t, []string{"other.sh", "test-node-0.sh", "test-node-1.sh", "test-node-x.sh"}, names)
+}
+
+func TestWarnLongTests(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(newLogger(&buf, slog.LevelInfo))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cli := &CLI{Nodes: 4}
+	cli.testInfos = []types.TestInfo{
+		{TestKey: key("p", "TestLong"), Duration: 60 * time.Second, Known: true},
+		{TestKey: key("p", "TestUnknownLong"), Duration: 60 * time.Second}, // assumed durations are not reported
+	}
+	for i := range 20 {
+		cli.testInfos = append(cli.testInfos, types.TestInfo{TestKey: key("p", "TestShort"+strconv.Itoa(i)), Duration: time.Second, Known: true})
+	}
+	cli.warnLongTests()
+
+	out := buf.String()
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, out, "test=TestLong duration=1m0s ideal=35s")
+	assert.NotContains(t, out, "TestUnknownLong")
+	assert.NotContains(t, out, "TestShort")
 }

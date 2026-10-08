@@ -352,6 +352,8 @@ func (c *CLI) createTestInfos() {
 // splitTests splits tests across nodes. The estimated overhead of a package is added once to
 // each node running the package, which favors keeping tests of a costly package together.
 func (c *CLI) splitTests() {
+	c.warnLongTests()
+
 	items := make([]durchunk.Item[types.TestKey], 0, len(c.testInfos))
 	for _, test := range c.testInfos {
 		items = append(items, durchunk.Item[types.TestKey]{Key: test.TestKey, Duration: test.Duration, Group: test.Package})
@@ -378,6 +380,35 @@ func (c *CLI) splitTests() {
 // overhead returns the estimated per-process overhead of the package.
 func (c *CLI) overhead(pkg string) time.Duration {
 	return c.overheads[pkg]
+}
+
+// warnLongTests warns about tests longer than the ideal time per node,
+// which limit how evenly tests can be split.
+func (c *CLI) warnLongTests() {
+	var total time.Duration
+	for _, ti := range c.testInfos {
+		total += ti.Duration
+	}
+	for _, d := range c.overheads {
+		total += d
+	}
+	ideal := total / time.Duration(c.Nodes)
+
+	var long []types.TestInfo
+	for _, ti := range c.testInfos {
+		if ti.Known && ti.Duration > ideal {
+			long = append(long, ti)
+		}
+	}
+	slices.SortStableFunc(long, func(a, b types.TestInfo) int { return cmp.Compare(b.Duration, a.Duration) })
+	for i, ti := range long {
+		if i == 5 {
+			slog.Warn("More tests are longer than the ideal time per node", "count", len(long)-i)
+			break
+		}
+		slog.Warn("Test is longer than the ideal time per node; consider splitting it",
+			"package", ti.Package, "test", ti.Function, "duration", ti.Duration, "ideal", ideal)
+	}
 }
 
 // testLines returns test process invocations of the node, longest first so that
