@@ -43,6 +43,7 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
   | -t, --template=FILE         | (built-in)          | Template file for test scripts                                               |                       |
   | --default-duration=DURATION | 0 (median)          | Duration assumed for tests without previous results. 0 uses the median of known durations (5s if none) |  |
   | --seed=UINT                 | 1                   | Random seed for splitting. The same input and seed produce the same scripts  |                       |
+  | --max-age=DURATION          | 0 (no limit)        | Ignore previous results older than this duration (e.g. `720h`)               |                       |
   | -p, --binaries-dir=DIR      | ./test-bin          | Path to test binaries, to output or pre-built                                | {{.BinariesDir}}      |
   | -b, --build-concurrency=INT | 4                   | Number of packages built in parallel (`go test -p`)                          |                       |
   | -d, --disable-build         | (build)             | Don't build test binaries, use pre-built by other way instead                |                       |
@@ -54,28 +55,29 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
 
 ### Overview
 
-* Receives a list of test packages from standard input (output of `go list ./...`)
+* **Packages**: receives a list of test packages from standard input (output of `go list ./...`)
   * Each line can be an import path (`github.com/foo/bar/api`) or a directory relative to the current directory (`api`, `./api`)
   * Packages are resolved with `go list`, and test files are parsed with AST (honoring build constraints) to obtain the top-level `TestXxx(t *testing.T)` functions
-  * If the `-s --scan-packages` argument is specified, all packages under the current directory (`./...`) are targeted
+  * With `-s --scan-packages`, all packages under the current directory (`./...`) are targeted
   * Packages can be excluded using `-x --exclude PATTERN`
-* For previous execution results, recursively reads all JSON files under the directory specified by `-j`
-  * JSONL files are expected to be in the format output by `go test -json` with Package name. (`go tool test2json -p "pkgname"`)
-  * Tests not found in previous results are distributed appropriately
+* **Previous results**: recursively reads all JSONL files (`go test -json` output with package names, e.g. `test2json -p "pkgname"`) under the directory specified by `-j`
+  * If a test appears in multiple files, the newest result (by event time) wins. Results older than `--max-age` are ignored
   * Tests not found in previous results are assumed to take the median of known durations (or `--default-duration`)
-* The split is deterministic: the same packages, previous results and `--seed` always produce the same scripts
-* Test binaries are built with a single `go test -c` invocation (split into batches only when binary base names collide) and named like `./test-bin/foo.bar.test`
-* Scripts of node indexes no longer generated (e.g. `test-node-7.sh` after reducing `-n` from 8 to 4) are removed
+  * The overhead of each package process (package elapsed time minus its tests, e.g. process startup and `TestMain`) is estimated from the results
+* **Splitting**: tests are split at the function level to minimize the longest node time
+  * The package overhead is added once to each node running the package, so tests of a costly package tend to stay on the same node
+  * With `-m`, functions of a package are grouped into processes with balanced durations
+  * Tests longer than the ideal time per node are reported as warnings, since they limit how evenly tests can be split
+  * The split is deterministic: the same packages, previous results and `--seed` always produce the same scripts
+* **Building**: test binaries are built with a single `go test -c` invocation (split into batches only when binary base names collide) into `-p` (`./test-bin`)
+  * Binary names are the package directories joined with `.` (`api/foo` → `api.foo.test`), with `.` and `%` in path elements escaped (`a/b.c` → `a.b%2Ec.test`, `.` → `%2E.test`)
+  * `test2json` is also built into the directory, so test nodes don't need the Go toolchain (`gotestsum` is still required)
+* **Scripts**: `./test-scripts/test-node-[NODE INDEX].sh` are generated from the built-in template `internal/templates/test-node.sh.tmpl`, or your own with `-t`
+  * Each process runs a test binary in the package directory with `-test.run "^(TestFoo|TestBar)$"`. The same package may run on multiple nodes, but each test runs only once
+  * Processes run in parallel with `xargs -0 -P`, longest first
+  * Tests are run via gotestsum, and JSONL files are output as `[JSON DIR]/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl`, then merged into `test-[NODE INDEX].jsonl` even if some tests failed. The script exits with the failure status
+  * Scripts of node indexes no longer generated (e.g. `test-node-7.sh` after reducing `-n` from 8 to 4) are removed
 * Logs are written to stderr in `key=value` format. `--dry-run` and `--plan -` write to stdout
-* Built-in template: `internal/templates/test-node.sh.tmpl`
-  * Assumes that test binaries for the packages to be executed are pre-built (instead of `go test`), and changes the current directory to the package directory when running tests
-  * Assumes test binaries are named like `./test-bin/foo.bar.test`
-  * Execution is divided by package, resulting in commands like `./test-bin/foo.bar.test -test.v -test.timeout=20m -test.run "^TestFooBar|TestHogeMoge$"`
-    * However, since distribution is at the test function level, the same package may be tested on multiple nodes, but duplication is avoided by specifying `-test.run`
-  * Uses `xargs -0 -P` for parallel execution within a node
-  * JSONL files of a node are merged into `test-[NODE INDEX].jsonl` even if some tests failed, and the script exits with the failure status
-  * Tests are run via gotestsum, and JSONL files are output in the format `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl`
-  * You can use own custom template with `-t` option.
 
 ### Template variables
 
@@ -83,11 +85,20 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
 |----------|------|-------------|
 | `{{.NodeIndex}}` | int | Node index (0 origin) |
 | `{{.Concurrency}}` | int | `-c` value |
-| `{{.TestLines}}` | []TestLine | Test process invocations. Each has `.Index` (1 origin), `.Package` (directory relative to the current directory) and `.TestPattern` (`^(TestA\|TestB)$`) |
+| `{{.TestLines}}` | []TestLine | Test process invocations, longest first (see below) |
 | `{{.JSONDir}}` | string | Absolute path of `-j` |
 | `{{.BinariesDir}}` | string | Absolute path of `-p` |
 | `{{.Flags}}` | string | Test flags joined with spaces (not quoted) |
 | `{{.TestFlags}}` | []string | Test flags |
+
+| TestLine field | type | description |
+|----------------|------|-------------|
+| `.Index` | int | Sequence number in the node (1 origin) |
+| `.Package` | string | Package directory relative to the current directory |
+| `.Binary` | string | File name of the test binary in `{{.BinariesDir}}` |
+| `.TestPattern` | string | `-test.run` pattern, e.g. `^(TestA\|TestB)$` |
+| `.Functions` | []string | Test functions in the process |
+| `.Estimated` | time.Duration | Estimated duration including the package overhead |
 
 The `shquote` function quotes a string for shells, e.g. `{{range .TestFlags}}{{shquote .}} {{end}}`.
 
