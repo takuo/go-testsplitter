@@ -2,61 +2,77 @@
 package scanner
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"log"
-	"os"
 	"slices"
-	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// ScanTestFunctions scans the specified Go packages for test functions.
-func ScanTestFunctions(packages []string) (funcs map[string][]string, err error) {
-	funcs = make(map[string][]string)
+// ScanTestFunctions parses test files of the packages and returns top-level test functions per package Dir.
+// Function names in each package are sorted.
+func ScanTestFunctions(packages []Package) (map[string][]string, error) {
+	funcs := make(map[string][]string)
 	fset := token.NewFileSet()
 
 	for _, pkg := range packages {
-		log.Printf("Parsing package: %s", pkg)
-
-		// Check if directory exists
-		if _, err := os.Stat(pkg); os.IsNotExist(err) {
-			log.Printf("Package directory %s does not exist, skipping", pkg)
-			continue
-		}
-
-		// Parse Go files in the package directory
-		pkgs, err := parser.ParseDir(fset, pkg, func(info fs.FileInfo) bool {
-			return strings.HasSuffix(info.Name(), "_test.go")
-		}, parser.ParseComments)
-		if err != nil {
-			log.Printf("Failed to parse package %s: %v, skipping", pkg, err)
-			continue
-		}
-
 		var functions []string
-		for _, astPkg := range pkgs {
-			for _, file := range astPkg.Files {
-				ast.Inspect(file, func(n ast.Node) bool {
-					if fn, ok := n.(*ast.FuncDecl); ok {
-						if fn.Name.IsExported() && strings.HasPrefix(fn.Name.Name, "Test") && fn.Name.Name != "Test" && fn.Name.Name != "TestMain" {
-							functions = append(functions, fn.Name.Name)
-						}
-					}
-					return true
-				})
+		for _, path := range pkg.TestFiles {
+			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse %s: %w", path, err)
+			}
+			for _, decl := range file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && isTestFunc(fn) {
+					functions = append(functions, fn.Name.Name)
+				}
 			}
 		}
-
-		if len(functions) > 0 {
-			slices.Sort(functions)
-			funcs[pkg] = functions
-			log.Printf("Found %d test functions in package %s", len(functions), pkg)
-		} else {
-			log.Printf("No test functions found in package %s", pkg)
+		if len(functions) == 0 {
+			log.Printf("No test functions found in package %s", pkg.Dir)
+			continue
 		}
+		slices.Sort(functions)
+		functions = slices.Compact(functions)
+		funcs[pkg.Dir] = functions
+		log.Printf("Found %d test functions in package %s", len(functions), pkg.Dir)
 	}
 	log.Printf("Found test functions in %d packages", len(funcs))
 	return funcs, nil
+}
+
+// isTestFunc reports whether fn is a test function recognized by `go test`:
+// func TestXxx(t *testing.T), where Xxx does not start with a lowercase letter.
+func isTestFunc(fn *ast.FuncDecl) bool {
+	if fn.Recv != nil || fn.Type.TypeParams != nil || fn.Type.Results != nil {
+		return false
+	}
+	if !isTestName(fn.Name.Name) {
+		return false
+	}
+	params := fn.Type.Params.List
+	if len(params) != 1 || len(params[0].Names) > 1 {
+		return false
+	}
+	star, ok := params[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := star.X.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "T"
+}
+
+func isTestName(name string) bool {
+	const prefix = "Test"
+	if len(name) < len(prefix) || name[:len(prefix)] != prefix {
+		return false
+	}
+	if len(name) == len(prefix) {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(name[len(prefix):])
+	return !unicode.IsLower(r)
 }

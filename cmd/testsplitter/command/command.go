@@ -144,11 +144,7 @@ func (c *CLI) readPackagesFromStdin() ([]string, error) {
 }
 
 func (c *CLI) scanTestFunctions() (err error) {
-	dirs := make([]string, 0, len(c.packages))
-	for _, pkg := range c.packages {
-		dirs = append(dirs, pkg.Dir)
-	}
-	c.testFunctions, err = scanner.ScanTestFunctions(dirs)
+	c.testFunctions, err = scanner.ScanTestFunctions(c.packages)
 	return
 }
 

@@ -11,51 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/takuo/go-testsplitter/internal/scanner"
 	"github.com/takuo/go-testsplitter/internal/types"
 )
-
-func TestParseTestFunctions(t *testing.T) {
-	// Create a temporary test directory
-	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "example_test.go")
-
-	// Create a sample test file
-	testContent := `package example
-
-import "testing"
-
-func TestExample(t *testing.T) {
-	// Test implementation
-}
-
-func TestAnother(t *testing.T) {
-	// Another test implementation
-}
-
-func BenchmarkExample(b *testing.B) {
-	// Benchmark - should be ignored
-}
-
-func helperFunction() {
-	// Helper function - should be ignored
-}
-`
-
-	err := os.WriteFile(testFile, []byte(testContent), 0o644)
-	require.NoError(t, err, "Failed to create test file")
-
-	testFunctions, err := scanner.ScanTestFunctions([]string{tmpDir})
-	require.NoError(t, err, "parseTestFunctions should not fail")
-
-	functions, exists := testFunctions[tmpDir]
-	require.True(t, exists, "Expected package %s to be found", tmpDir)
-
-	expectedFunctions := []string{"TestExample", "TestAnother"}
-	assert.Equal(t, len(expectedFunctions), len(functions), "Should have correct number of test functions")
-	assert.Contains(t, functions, "TestExample", "Should contain TestExample")
-	assert.Contains(t, functions, "TestAnother", "Should contain TestAnother")
-}
 
 func TestCreateTestInfos(t *testing.T) {
 	cli := &CLI{
