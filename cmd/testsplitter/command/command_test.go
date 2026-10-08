@@ -28,6 +28,7 @@ func TestValidate(t *testing.T) {
 		"concurrency":       func(c *CLI) { c.Concurrency = 0 },
 		"build-concurrency": func(c *CLI) { c.BuildConcurrency = 0 },
 		"max-functions":     func(c *CLI) { c.MaxFunctions = -1 },
+		"max-age":           func(c *CLI) { c.MaxAge = -time.Second },
 		"default-duration":  func(c *CLI) { c.DefaultDuration = -time.Second },
 		"exclude":           func(c *CLI) { c.Exclude = "(" },
 	}
@@ -70,6 +71,41 @@ func TestDefaultDuration(t *testing.T) {
 		DefaultDuration: 3 * time.Second,
 		testDurations:   map[types.TestKey]time.Duration{key("p", "T"): time.Second},
 	}).estimateDefaultDuration())
+}
+
+func TestLoadTestDurations(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	}
+	// newer.jsonl sorts before older.jsonl, but its results are newer
+	write("newer.jsonl", `{"Time":"2026-10-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":2}
+{"Time":"2026-10-01T00:00:01Z","Action":"pass","Package":"p","Elapsed":3}
+`)
+	write("older.jsonl", `{"Time":"2026-09-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":9}
+{"Time":"2026-09-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestOld","Elapsed":9}
+{"Time":"2026-09-01T00:00:01Z","Action":"pass","Package":"p","Elapsed":28}
+`)
+	write("notime.jsonl", `{"Action":"pass","Package":"p","Test":"TestA","Elapsed":7}
+`)
+	now := func() time.Time { return time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC) }
+
+	cli := &CLI{JSONDir: dir, now: now}
+	require.NoError(t, cli.loadTestDurations())
+	assert.Equal(t, map[types.TestKey]time.Duration{
+		key("p", "TestA"):   2 * time.Second, // newest wins regardless of file order
+		key("p", "TestOld"): 9 * time.Second,
+	}, cli.testDurations)
+
+	cli = &CLI{JSONDir: dir, now: now, MaxAge: 30 * 24 * time.Hour}
+	require.NoError(t, cli.loadTestDurations())
+	assert.Equal(t, map[types.TestKey]time.Duration{key("p", "TestA"): 2 * time.Second}, cli.testDurations)
+}
+
+func TestLoadTestDurations_NoDirectory(t *testing.T) {
+	cli := &CLI{JSONDir: filepath.Join(t.TempDir(), "missing")}
+	require.NoError(t, cli.loadTestDurations())
+	assert.Empty(t, cli.testDurations)
 }
 
 func TestSplitTests(t *testing.T) {

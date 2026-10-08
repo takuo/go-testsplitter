@@ -42,6 +42,7 @@ type CLI struct {
 	ScanPackages    bool          `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
 	Exclude         string        `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
 	JSONDir         string        `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
+	MaxAge          time.Duration `long:"max-age" default:"0s" help:"Ignore previous results older than this duration, e.g. 720h (0: no limit)"`
 	Template        string        `short:"t" long:"template" help:"Path to the template file (optional)"`
 	MaxFunctions    int           `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per test process (0: unlimited)"`
 	DefaultDuration time.Duration `long:"default-duration" default:"0s" help:"Duration assumed for tests without previous results (0: median of known durations, or 5s)"`
@@ -65,6 +66,7 @@ type CLI struct {
 	stdout          io.Writer                       `kong:"-"`
 	packages        []scanner.Package               `kong:"-"`
 	testFunctions   map[string][]string             `kong:"-"`
+	now             func() time.Time                `kong:"-"`
 	testDurations   map[types.TestKey]time.Duration `kong:"-"`
 	defaultDuration time.Duration                   `kong:"-"`
 	testInfos       []types.TestInfo                `kong:"-"`
@@ -86,6 +88,9 @@ func (c *CLI) Validate() error {
 	}
 	if c.MaxFunctions < 0 {
 		errs = append(errs, errors.New("--max-functions must be >= 0"))
+	}
+	if c.MaxAge < 0 {
+		errs = append(errs, errors.New("--max-age must be >= 0"))
 	}
 	if c.DefaultDuration < 0 {
 		errs = append(errs, errors.New("--default-duration must be >= 0"))
@@ -224,7 +229,20 @@ func (c *CLI) scanTestFunctions() (err error) {
 func (c *CLI) loadTestDurations() error {
 	var files int
 
+	tests := make(map[types.TestKey]parser.Result)
 	c.testDurations = make(map[types.TestKey]time.Duration)
+
+	var since time.Time
+	if c.MaxAge > 0 {
+		now := time.Now
+		if c.now != nil {
+			now = c.now
+		}
+		since = now().Add(-c.MaxAge)
+	}
+	fresh := func(r parser.Result) bool {
+		return since.IsZero() || r.Time.IsZero() || !r.Time.Before(since)
+	}
 
 	err := filepath.WalkDir(c.JSONDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -243,19 +261,30 @@ func (c *CLI) loadTestDurations() error {
 			return nil
 		}
 
-		data, err := parseJSONFile(path)
+		results, err := parseJSONFile(path)
 		if err != nil {
 			slog.Warn("Failed to read test results", "path", path, "err", err)
+			if results == nil {
+				return nil
+			}
 		}
 		files++
-		maps.Copy(c.testDurations, data)
+		for k, r := range results.Tests {
+			// The newest result wins. Results without time are older than any timed result.
+			if prev, ok := tests[k]; fresh(r) && (!ok || !r.Time.Before(prev.Time)) {
+				tests[k] = r
+			}
+		}
 		return nil
 	})
+	for k, r := range tests {
+		c.testDurations[k] = r.Duration
+	}
 	slog.Info("Loaded test durations", "tests", len(c.testDurations), "files", files, "dir", c.JSONDir)
 	return err
 }
 
-func parseJSONFile(path string) (map[types.TestKey]time.Duration, error) {
+func parseJSONFile(path string) (*parser.Results, error) {
 	fp, err := os.Open(path)
 	if err != nil {
 		return nil, err

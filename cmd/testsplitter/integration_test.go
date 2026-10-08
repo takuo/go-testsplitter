@@ -197,7 +197,7 @@ func TestEndToEnd(t *testing.T) {
 		defer fp.Close()
 		durations, err := parser.ParseGoTestJSONL(fp)
 		require.NoError(t, err)
-		for k := range durations {
+		for k := range durations.Tests {
 			ran[k]++
 		}
 		return nil

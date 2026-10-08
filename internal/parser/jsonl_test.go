@@ -15,6 +15,14 @@ func key(pkg, fn string) types.TestKey {
 	return types.TestKey{Package: pkg, Function: fn}
 }
 
+func durations(r *Results) map[types.TestKey]time.Duration {
+	m := make(map[types.TestKey]time.Duration, len(r.Tests))
+	for k, v := range r.Tests {
+		m[k] = v.Duration
+	}
+	return m
+}
+
 func TestParseGoTestJSONL(t *testing.T) {
 	input := `{"Time":"2023-01-01T00:00:00Z","Action":"start","Package":"pkg"}
 {"Time":"2023-01-01T00:00:00Z","Action":"run","Package":"pkg","Test":"TestA"}
@@ -36,7 +44,7 @@ not a json line
 		key("pkg", "TestA"):    1500 * time.Millisecond, // Elapsed
 		key("pkg", "TestB"):    250 * time.Millisecond,  // fallback to Time difference
 		key("pkg", "TestFast"): 0,                       // known, but fast
-	}, got)
+	}, durations(got))
 }
 
 func TestParseGoTestJSONL_Rerun(t *testing.T) {
@@ -47,7 +55,7 @@ func TestParseGoTestJSONL_Rerun(t *testing.T) {
 `
 	got, err := ParseGoTestJSONL(strings.NewReader(input))
 	require.NoError(t, err)
-	assert.Equal(t, map[types.TestKey]time.Duration{key("pkg", "TestA"): 2 * time.Second}, got)
+	assert.Equal(t, map[types.TestKey]time.Duration{key("pkg", "TestA"): 2 * time.Second}, durations(got))
 }
 
 func TestParseGoTestJSONL_LongLine(t *testing.T) {
@@ -63,5 +71,13 @@ func TestParseGoTestJSONL_LongLine(t *testing.T) {
 	assert.Equal(t, map[types.TestKey]time.Duration{
 		key("pkg", "TestA"): 1 * time.Second,
 		key("pkg", "TestB"): 2 * time.Second,
-	}, got)
+	}, durations(got))
+}
+
+func TestParseGoTestJSONL_Time(t *testing.T) {
+	input := `{"Time":"2023-01-01T00:00:00Z","Action":"run","Package":"pkg","Test":"TestA"}
+{"Time":"2023-01-01T00:00:01Z","Action":"pass","Package":"pkg","Test":"TestA","Elapsed":1}`
+	got, err := ParseGoTestJSONL(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, Result{Duration: time.Second, Time: time.Date(2023, 1, 1, 0, 0, 1, 0, time.UTC)}, got.Tests[key("pkg", "TestA")])
 }
