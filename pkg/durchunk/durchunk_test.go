@@ -128,3 +128,22 @@ func TestSplitBalanced_Deterministic(t *testing.T) {
 		assert.Equal(t, first, SplitBalanced(seq, 4))
 	}
 }
+
+func TestSplitBalanced_SubSecond(t *testing.T) {
+	// Durations below 1s must not be truncated to zero
+	data := map[string]time.Duration{}
+	for i := range 20 {
+		data[fmt.Sprintf("k%02d", i)] = time.Duration(i+1) * 10 * time.Millisecond
+	}
+	chunks := SplitBalanced(maps.All(data), 3)
+	assert.Len(t, chunks, 3)
+
+	var total time.Duration
+	lo, hi := chunks[0].Total, chunks[0].Total
+	for _, c := range chunks {
+		total += c.Total
+		lo, hi = min(lo, c.Total), max(hi, c.Total)
+	}
+	assert.Equal(t, 2100*time.Millisecond, total)
+	assert.LessOrEqual(t, hi-lo, 10*time.Millisecond, "lo=%v hi=%v", lo, hi)
+}

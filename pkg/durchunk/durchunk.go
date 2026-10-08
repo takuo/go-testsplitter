@@ -31,7 +31,7 @@ type Chunk struct {
 
 type entry struct {
 	Key string
-	Dur int64
+	Dur time.Duration
 }
 
 // SplitBalanced は map[string]time.Duration を指定したチャンク数に分割します。
@@ -46,22 +46,21 @@ func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int, opts .
 	rng := rand.New(rand.NewPCG(o.seed, o.seed))
 
 	entries := []entry{}
-	globalDurMap := make(map[string]int64)
+	globalDurMap := make(map[string]time.Duration)
 	for k, v := range data {
-		sec := int64(v.Seconds())
-		globalDurMap[k] = sec
-		entries = append(entries, entry{Key: k, Dur: sec})
+		globalDurMap[k] = v
+		entries = append(entries, entry{Key: k, Dur: v})
 	}
 
 	chunks := greedyPartition(entries, chunkCount, rng)
 	chunks = simulatedAnnealing(chunks, 50000, 1000.0, 0.01, globalDurMap, rng)
 
 	for i := range chunks {
-		totalSec := int64(0)
+		var total time.Duration
 		for _, k := range chunks[i].Keys {
-			totalSec += globalDurMap[k]
+			total += globalDurMap[k]
 		}
-		chunks[i].Total = time.Duration(totalSec) * time.Second
+		chunks[i].Total = total
 	}
 
 	return chunks
@@ -74,7 +73,7 @@ func greedyPartition(entries []entry, m int, rng *rand.Rand) []Chunk {
 	rng.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
 
 	chunks := make([]Chunk, m)
-	sums := make([]int64, m)
+	sums := make([]time.Duration, m)
 	for _, e := range entries {
 		best := 0
 		for i := 1; i < m; i++ {
@@ -84,12 +83,12 @@ func greedyPartition(entries []entry, m int, rng *rand.Rand) []Chunk {
 		}
 		chunks[best].Keys = append(chunks[best].Keys, e.Key)
 		sums[best] += e.Dur
-		chunks[best].Total = time.Duration(sums[best]) * time.Second
+		chunks[best].Total = sums[best]
 	}
 	return chunks
 }
 
-func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float64, durMap map[string]int64, rng *rand.Rand) []Chunk {
+func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float64, durMap map[string]time.Duration, rng *rand.Rand) []Chunk {
 	best := copyChunks(chunks)
 	bestScore := score(best)
 	current := copyChunks(chunks)
@@ -124,15 +123,15 @@ func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float
 		}
 
 		for i := range next {
-			sum := int64(0)
+			var sum time.Duration
 			for _, k := range next[i].Keys {
 				sum += durMap[k]
 			}
-			next[i].Total = time.Duration(sum) * time.Second
+			next[i].Total = sum
 		}
 
 		nextScore := score(next)
-		delta := float64(nextScore - currentScore)
+		delta := nextScore - currentScore
 		if delta < 0 || rng.Float64() < math.Exp(-delta/t) {
 			current = next
 			currentScore = nextScore
@@ -146,7 +145,8 @@ func simulatedAnnealing(chunks []Chunk, iterations int, tempStart, tempEnd float
 	return best
 }
 
-func score(chunks []Chunk) int64 {
+// score returns the spread (max - min) of chunk totals in seconds.
+func score(chunks []Chunk) float64 {
 	min, max := chunks[0].Total.Seconds(), chunks[0].Total.Seconds()
 	for _, c := range chunks[1:] {
 		sec := c.Total.Seconds()
@@ -157,7 +157,7 @@ func score(chunks []Chunk) int64 {
 			max = sec
 		}
 	}
-	return int64(max - min)
+	return max - min
 }
 
 func copyChunks(chunks []Chunk) []Chunk {
