@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -18,6 +19,27 @@ type Plan struct {
 	UnknownTests           int        `json:"unknown_tests"`
 	DefaultDurationSeconds float64    `json:"default_duration_seconds"`
 	MakespanSeconds        float64    `json:"makespan_seconds"`
+	// Selection is set with --changed-since.
+	Selection *PlanSelection `json:"selection,omitempty"`
+}
+
+// PlanSelection is the result of selecting packages by changes.
+type PlanSelection struct {
+	ChangedSince string   `json:"changed_since"`
+	MergeBase    string   `json:"merge_base"`
+	ChangedFiles []string `json:"changed_files"`
+	// RunAllFile is the changed file which matched --run-all-on, if any. Then all packages are selected.
+	RunAllFile      string            `json:"run_all_file,omitempty"`
+	ChangedPackages []string          `json:"changed_packages"`
+	Selected        []PlanSelectedPkg `json:"selected_packages"`
+	TotalPackages   int               `json:"total_packages"`
+}
+
+// PlanSelectedPkg is a package selected by changes.
+type PlanSelectedPkg struct {
+	Package string `json:"package"`
+	// AffectedBy is the changed packages (import paths) the tests depend on. Empty when all packages are selected.
+	AffectedBy []string `json:"affected_by,omitempty"`
 }
 
 // PlanNode is the tests assigned to a node.
@@ -91,7 +113,30 @@ func (c *CLI) buildPlan() Plan {
 		plan.Nodes = append(plan.Nodes, node)
 	}
 	plan.MakespanSeconds = makespan.Seconds()
+
+	if sel := c.selection; sel != nil {
+		ps := &PlanSelection{
+			ChangedSince:    sel.since,
+			MergeBase:       sel.base,
+			ChangedFiles:    nonNil(sel.changedFiles),
+			RunAllFile:      sel.runAllFile,
+			ChangedPackages: nonNil(sel.changedPackages),
+			Selected:        []PlanSelectedPkg{},
+			TotalPackages:   sel.total,
+		}
+		for _, pkg := range c.packages {
+			ps.Selected = append(ps.Selected, PlanSelectedPkg{Package: pkg.Dir, AffectedBy: sel.affectedBy[pkg.Dir]})
+		}
+		plan.Selection = ps
+	}
 	return plan
+}
+
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 func (c *CLI) writePlanJSON(path string) (err error) {
@@ -133,6 +178,18 @@ func (c *CLI) printPlan(w io.Writer) error {
 	}
 	if err := tw.Flush(); err != nil {
 		return err
+	}
+
+	if sel := plan.Selection; sel != nil {
+		if sel.RunAllFile != "" {
+			fmt.Fprintf(w, "\nRunning all %d packages: %s changed since %s\n", sel.TotalPackages, sel.RunAllFile, sel.ChangedSince)
+		} else {
+			fmt.Fprintf(w, "\nSelected %d of %d packages affected by %d changed files since %s\n",
+				len(sel.Selected), sel.TotalPackages, len(sel.ChangedFiles), sel.ChangedSince)
+			for _, p := range sel.Selected {
+				fmt.Fprintf(w, "  %s (affected by %s)\n", p.Package, strings.Join(p.AffectedBy, ", "))
+			}
+		}
 	}
 
 	fmt.Fprintf(w, "\nTotal %d tests, makespan %s", plan.TotalTests, seconds(plan.MakespanSeconds))

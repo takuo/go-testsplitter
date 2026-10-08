@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/takuo/go-testsplitter/internal/scanner"
 	"github.com/takuo/go-testsplitter/internal/types"
 )
 
@@ -86,4 +87,43 @@ func TestPrintPlan(t *testing.T) {
 	assert.Contains(t, out, "Total 4 tests, makespan 6s (1 tests without previous results, assumed 3s each)")
 	assert.Contains(t, out, "[node 0]")
 	assert.Contains(t, out, "[node 1]")
+}
+
+func TestPlanSelection(t *testing.T) {
+	cli := planCLI()
+	cli.packages = []scanner.Package{{Dir: "pkg1"}, {Dir: "pkg2"}}
+	cli.selection = &selection{
+		since:           "origin/main",
+		base:            "abc",
+		changedFiles:    []string{"lib/a.go", "pkg2/b.go"},
+		changedPackages: []string{"m/lib", "m/pkg2"},
+		affectedBy:      map[string][]string{"pkg1": {"m/lib"}, "pkg2": {"m/lib", "m/pkg2"}},
+		total:           5,
+	}
+
+	plan := cli.buildPlan()
+	require.NotNil(t, plan.Selection)
+	assert.Equal(t, &PlanSelection{
+		ChangedSince:    "origin/main",
+		MergeBase:       "abc",
+		ChangedFiles:    []string{"lib/a.go", "pkg2/b.go"},
+		ChangedPackages: []string{"m/lib", "m/pkg2"},
+		Selected: []PlanSelectedPkg{
+			{Package: "pkg1", AffectedBy: []string{"m/lib"}},
+			{Package: "pkg2", AffectedBy: []string{"m/lib", "m/pkg2"}},
+		},
+		TotalPackages: 5,
+	}, plan.Selection)
+
+	var buf bytes.Buffer
+	require.NoError(t, cli.printPlan(&buf))
+	assert.Contains(t, buf.String(), "Selected 2 of 5 packages affected by 2 changed files since origin/main\n  pkg1 (affected by m/lib)\n")
+
+	cli.selection.runAllFile = "go.mod"
+	buf.Reset()
+	require.NoError(t, cli.printPlan(&buf))
+	assert.Contains(t, buf.String(), "Running all 5 packages: go.mod changed since origin/main")
+
+	cli.selection = nil
+	assert.Nil(t, cli.buildPlan().Selection)
 }

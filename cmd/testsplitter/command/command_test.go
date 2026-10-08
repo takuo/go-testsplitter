@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -33,6 +35,7 @@ func TestValidate(t *testing.T) {
 		"max-age":           func(c *CLI) { c.MaxAge = -time.Second },
 		"default-duration":  func(c *CLI) { c.DefaultDuration = -time.Second },
 		"exclude":           func(c *CLI) { c.Exclude = "(" },
+		"run-all-on":        func(c *CLI) { c.RunAllOn = "(" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -312,4 +315,20 @@ func TestWarnLongTests(t *testing.T) {
 	assert.Contains(t, out, "test=TestLong duration=1m0s ideal=35s")
 	assert.NotContains(t, out, "TestUnknownLong")
 	assert.NotContains(t, out, "TestShort")
+}
+
+func TestDefaultRunAllOn(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+	_, err = parser.Parse(nil)
+	require.NoError(t, err)
+
+	re := regexp.MustCompile(cli.RunAllOn)
+	for _, f := range []string{"go.mod", "go.sum", "go.work", "sub/module/go.mod"} {
+		assert.True(t, re.MatchString(f), f)
+	}
+	for _, f := range []string{"go.mod.bak", "cargo.mod", "docs/go.md", "main.go"} {
+		assert.False(t, re.MatchString(f), f)
+	}
 }

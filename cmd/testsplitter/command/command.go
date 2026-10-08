@@ -42,6 +42,8 @@ type CLI struct {
 	ScriptsDir      string        `short:"o" long:"scripts-dir" default:"./test-scripts" help:"Directory to output generated scripts"`
 	ScanPackages    bool          `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
 	Exclude         string        `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
+	ChangedSince    string        `long:"changed-since" placeholder:"REV" help:"Run only tests of packages affected by changes since the merge base of REV and HEAD (e.g. origin/main)"`
+	RunAllOn        string        `long:"run-all-on" placeholder:"REGEX" default:"(^|/)go[.](mod|sum|work)$" help:"With --changed-since, run all tests if a changed file path (relative to the repository root) matches REGEX ('' to disable)"`
 	JSONDir         string        `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
 	MaxAge          time.Duration `long:"max-age" default:"0s" help:"Ignore previous results older than this duration, e.g. 720h (0: no limit)"`
 	Template        string        `short:"t" long:"template" help:"Path to the template file (optional)"`
@@ -65,7 +67,9 @@ type CLI struct {
 	// Runtime context
 	stdin           io.Reader                       `kong:"-"`
 	stdout          io.Writer                       `kong:"-"`
+	patterns        []string                        `kong:"-"`
 	packages        []scanner.Package               `kong:"-"`
+	selection       *selection                      `kong:"-"`
 	testFunctions   map[string][]string             `kong:"-"`
 	now             func() time.Time                `kong:"-"`
 	testDurations   map[types.TestKey]time.Duration `kong:"-"`
@@ -102,6 +106,11 @@ func (c *CLI) Validate() error {
 			errs = append(errs, fmt.Errorf("invalid --exclude pattern: %w", err))
 		}
 	}
+	if c.RunAllOn != "" {
+		if _, err := regexp.Compile(c.RunAllOn); err != nil {
+			errs = append(errs, fmt.Errorf("invalid --run-all-on pattern: %w", err))
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -111,6 +120,11 @@ func (c *CLI) Run(ctx context.Context) error {
 
 	if err := c.listPackages(); err != nil {
 		return err
+	}
+	if c.ChangedSince != "" {
+		if err := c.selectChangedPackages(ctx); err != nil {
+			return fmt.Errorf("failed to select packages changed since %s: %w", c.ChangedSince, err)
+		}
 	}
 	if !c.DisableBuild && !c.DryRun {
 		if err := c.buildTestBinaries(ctx); err != nil {
@@ -176,6 +190,7 @@ func (c *CLI) listPackages() error {
 		slog.Info("Read packages from stdin", "count", len(patterns))
 	}
 
+	c.patterns = patterns
 	var err error
 	if c.packages, err = scanner.ListPackages(patterns, exclude); err != nil {
 		return fmt.Errorf("failed to list packages: %w", err)

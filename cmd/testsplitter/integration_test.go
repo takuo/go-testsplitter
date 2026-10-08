@@ -242,3 +242,97 @@ func TestBuildCollidingNames(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, entries, 4, "test binaries and test2json, no temporary directories are left")
 }
+
+// TestChangedSince selects packages affected by changes in a git repository.
+func TestChangedSince(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	binary := buildBinary(t)
+	work := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "init.defaultBranch=main"}, args...)...)
+		cmd.Dir = work
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(work, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
+	write("go.mod", "module example.com/m\n\ngo 1.21\n")
+	write("lib/lib.go", "package lib\nfunc F() int { return 1 }\n")
+	write("app/app.go", "package app\nimport \"example.com/m/lib\"\nfunc G() int { return lib.F() }\n")
+	write("app/app_test.go", "package app\nimport \"testing\"\nfunc TestG(t *testing.T) { G() }\n")
+	write("tonly/tonly_test.go", "package tonly_test\nimport (\"testing\"; \"example.com/m/lib\")\nfunc TestX(t *testing.T) { lib.F() }\n")
+	write("indep/indep_test.go", "package indep\nimport \"testing\"\nfunc TestI(t *testing.T) {}\n")
+	write(".gitignore", "test-bin/\ntest-scripts/\n")
+	git("init")
+	git("add", ".")
+	git("commit", "-m", "init")
+	git("switch", "-c", "feature")
+
+	type selection struct {
+		RunAllFile string `json:"run_all_file"`
+		Selected   []struct {
+			Package string `json:"package"`
+		} `json:"selected_packages"`
+		TotalPackages int `json:"total_packages"`
+	}
+	planOf := func(args ...string) selection {
+		t.Helper()
+		cmd := exec.Command(binary, append([]string{"-s", "-q", "-n", "2", "--plan", "-", "--changed-since", "main"}, args...)...)
+		cmd.Dir = work
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		require.NoError(t, err, stderr.String())
+		var plan struct {
+			Selection selection `json:"selection"`
+		}
+		require.NoError(t, json.Unmarshal(out, &plan), "%s", out)
+		return plan.Selection
+	}
+	packages := func(s selection) []string {
+		var pkgs []string
+		for _, p := range s.Selected {
+			pkgs = append(pkgs, p.Package)
+		}
+		return pkgs
+	}
+
+	t.Run("no changes", func(t *testing.T) {
+		sel := planOf("--dry-run")
+		assert.Empty(t, sel.Selected)
+		assert.Equal(t, 3, sel.TotalPackages)
+	})
+
+	t.Run("library change selects dependents and builds only them", func(t *testing.T) {
+		write("lib/lib.go", "package lib\nfunc F() int { return 2 }\n")
+		sel := planOf() // not a dry-run: builds binaries and writes scripts
+		assert.Equal(t, []string{"app", "tonly"}, packages(sel))
+
+		entries, err := os.ReadDir(filepath.Join(work, "test-bin"))
+		require.NoError(t, err)
+		var bins []string
+		for _, e := range entries {
+			bins = append(bins, e.Name())
+		}
+		assert.Equal(t, []string{"app.test", "test2json", "tonly.test"}, bins)
+	})
+
+	t.Run("go.mod change runs all tests", func(t *testing.T) {
+		write("go.mod", "module example.com/m\n\ngo 1.22\n")
+		sel := planOf("--dry-run")
+		assert.Equal(t, "go.mod", sel.RunAllFile)
+		assert.Equal(t, []string{"app", "indep", "tonly"}, packages(sel))
+
+		git("checkout", "lib/lib.go")
+		sel = planOf("--dry-run", "--run-all-on", "")
+		assert.Empty(t, sel.RunAllFile)
+		assert.Empty(t, sel.Selected, "go.mod belongs to no package")
+	})
+}
