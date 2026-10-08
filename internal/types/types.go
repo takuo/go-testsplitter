@@ -2,42 +2,8 @@
 package types
 
 import (
-	"encoding/xml"
 	"time"
 )
-
-// TestSuite represents a JUnit XML test suite
-type TestSuite struct {
-	XMLName   xml.Name   `xml:"testsuite"`
-	Name      string     `xml:"name,attr"`
-	Tests     int        `xml:"tests,attr"`
-	Failures  int        `xml:"failures,attr"`
-	Errors    int        `xml:"errors,attr"`
-	Time      float64    `xml:"time,attr"`
-	TestCases []TestCase `xml:"testcase"`
-}
-
-// TestCase represents a JUnit XML test case
-type TestCase struct {
-	XMLName   xml.Name `xml:"testcase"`
-	Name      string   `xml:"name,attr"`
-	Classname string   `xml:"classname,attr"`
-	Time      float64  `xml:"time,attr"`
-	Failure   *Failure `xml:"failure,omitempty"`
-	Error     *Error   `xml:"error,omitempty"`
-}
-
-// Failure represents a JUnit XML test failure
-type Failure struct {
-	Message string `xml:"message,attr"`
-	Text    string `xml:",chardata"`
-}
-
-// Error represents a JUnit XML test error
-type Error struct {
-	Message string `xml:"message,attr"`
-	Text    string `xml:",chardata"`
-}
 
 // TestKey identifies a top-level test function in a package.
 type TestKey struct {
