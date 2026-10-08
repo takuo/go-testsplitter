@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"text/template"
@@ -30,8 +31,8 @@ type CLI struct {
 	Nodes        int      `short:"n" long:"nodes" required:"" default:"4" help:"Number of nodes"`
 	Concurrency  int      `short:"c" long:"concurrency" default:"4" help:"Number of concurrent test executions per node"`
 	ScriptsDir   string   `short:"o" long:"scripts-dir" required:"" default:"./test-scripts" help:"Directory to output generated scripts"`
-	ScanPackages bool     `short:"s" long:"scan-packages" help:"Scan Go packages from the current directory (like 'go list'). If not specified, package list is read from stdin."`
-	Exclude      string   `short:"x" long:"exclude" help:"Regex pattern to exclude packages (used only with --scan-packages)"`
+	ScanPackages bool     `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
+	Exclude      string   `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
 	JSONDir      string   `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
 	Template     string   `short:"t" long:"template" help:"Path to the template file (optional)"`
 	MaxFunctions int      `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per package (0: unlimited)"`
@@ -44,7 +45,7 @@ type CLI struct {
 	Version kong.VersionFlag `short:"v" long:"version" help:"Print version and exit"`
 
 	// Runtime context
-	packages      []string                  `kong:"-"`
+	packages      []scanner.Package         `kong:"-"`
 	testFunctions map[string][]string       `kong:"-"`
 	testDurations map[string]time.Duration  `kong:"-"`
 	testInfos     []types.TestInfo          `kong:"-"`
@@ -52,25 +53,36 @@ type CLI struct {
 	template      string                    `kong:"-"`
 }
 
-func (c *CLI) scanPackages() (err error) {
-	// Get packages either from scan directory or stdin
-	if c.ScanPackages {
-		if c.packages, err = scanner.ScanPackages(c.Exclude); err != nil {
-			return fmt.Errorf("failed to scan packages: %v", err)
+func (c *CLI) listPackages() error {
+	var exclude *regexp.Regexp
+	if c.Exclude != "" {
+		var err error
+		if exclude, err = regexp.Compile(c.Exclude); err != nil {
+			return fmt.Errorf("invalid exclude pattern: %w", err)
 		}
-	} else {
-		if err = c.readPackagesFromStdin(); err != nil {
-			return fmt.Errorf("failed to read packages from stdin: %v", err)
-		}
-		log.Printf("Read %d packages from stdin: %v", len(c.packages), c.packages)
 	}
+
+	patterns := []string{"./..."}
+	if !c.ScanPackages {
+		var err error
+		if patterns, err = c.readPackagesFromStdin(); err != nil {
+			return fmt.Errorf("failed to read packages from stdin: %w", err)
+		}
+		log.Printf("Read %d packages from stdin", len(patterns))
+	}
+
+	var err error
+	if c.packages, err = scanner.ListPackages(patterns, exclude); err != nil {
+		return fmt.Errorf("failed to list packages: %w", err)
+	}
+	log.Printf("Found %d packages with test files", len(c.packages))
 	return nil
 }
 
 // Run run the command line
 func (c *CLI) Run() error {
-	if err := c.scanPackages(); err != nil {
-		return fmt.Errorf("failed to scan packages from %s: %v", ".", err)
+	if err := c.listPackages(); err != nil {
+		return err
 	}
 	if !c.DisableBuild {
 		if err := c.buildTestBinaries(); err != nil {
@@ -119,20 +131,23 @@ func (c *CLI) loadTemplate() (err error) {
 	return
 }
 
-func (c *CLI) readPackagesFromStdin() (err error) {
-	c.packages = []string{} // initialize packages slice
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		pkg := strings.TrimSpace(scanner.Text())
-		if pkg != "" {
-			c.packages = append(c.packages, pkg)
+func (c *CLI) readPackagesFromStdin() ([]string, error) {
+	var packages []string
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		if pkg := strings.TrimSpace(sc.Text()); pkg != "" {
+			packages = append(packages, pkg)
 		}
 	}
-	return scanner.Err()
+	return packages, sc.Err()
 }
 
 func (c *CLI) scanTestFunctions() (err error) {
-	c.testFunctions, err = scanner.ScanTestFunctions(c.packages)
+	dirs := make([]string, 0, len(c.packages))
+	for _, pkg := range c.packages {
+		dirs = append(dirs, pkg.Dir)
+	}
+	c.testFunctions, err = scanner.ScanTestFunctions(dirs)
 	return
 }
 
@@ -318,12 +333,12 @@ func (c *CLI) buildTestBinaries() error {
 	// 例: api/service/foo → api.service.foo.test
 	for _, pkg := range c.packages {
 		p.Go(func() error {
-			binName := strings.ReplaceAll(pkg, "/", ".") + ".test"
+			binName := strings.ReplaceAll(pkg.Dir, "/", ".") + ".test"
 			outputPath := filepath.Join(outputPath, binName)
-			log.Printf("Building %s as %s...\n", pkg, outputPath)
+			log.Printf("Building %s as %s...\n", pkg.Dir, outputPath)
 			outputPath, _ = filepath.Abs(outputPath)
 			cmd := exec.Command("go", "test", "-c", "-o", outputPath, ".")
-			cmd.Dir = filepath.Join(cwd, pkg)
+			cmd.Dir = filepath.Join(cwd, pkg.Dir)
 			output, err := cmd.CombinedOutput()
 			if len(output) > 0 {
 				fmt.Println(string(output))

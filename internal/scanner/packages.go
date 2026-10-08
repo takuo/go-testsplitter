@@ -2,62 +2,107 @@ package scanner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
-// ScanPackages scans the specified directory for Go packages, excluding any that match the given pattern.
-func ScanPackages(excludePattern string) ([]string, error) {
-	var excludeRegex *regexp.Regexp
-	var err error
+// Package is a Go package which has test files.
+type Package struct {
+	// Dir is the package directory relative to the current directory, slash-separated (e.g. "api/service/foo").
+	// It is also used as the package name of test results.
+	Dir string
+	// ImportPath is the import path of the package.
+	ImportPath string
+	// TestFiles is the list of absolute paths of _test.go files (in-package and external) honoring build constraints.
+	TestFiles []string
+}
 
-	if excludePattern != "" {
-		excludeRegex, err = regexp.Compile(excludePattern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid exclude pattern: %v", err)
-		}
+type goListPackage struct {
+	Dir          string
+	ImportPath   string
+	TestGoFiles  []string
+	XTestGoFiles []string
+}
+
+// ListPackages resolves package patterns (import paths, relative directories, or patterns like "./...")
+// with `go list` and returns packages which have test files, sorted by Dir.
+// Packages whose import path or directory matches exclude are skipped.
+//
+// A bare relative directory such as "api/foo" is treated as "./api/foo" if it exists,
+// because `go list` would interpret it as an import path.
+func ListPackages(patterns []string, exclude *regexp.Regexp) ([]Package, error) {
+	if len(patterns) == 0 {
+		return nil, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("%w: could not get current directory", err)
-	}
-	cmd := exec.Command("go", "list", "-test", "-f", `{"Name":"{{ .Name }}","Dir":"{{.Dir}}","Root":"{{.Root}}","ImportPath":"{{.ImportPath}}"}`, "./...")
-	cmd.Dir = cwd
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("%w: failed to run go list: %v", err, string(output))
-	}
-	type Package struct {
-		Dir        string
-		ImportPath string
-		Root       string
+		return nil, fmt.Errorf("could not get current directory: %w", err)
 	}
 
-	lines := strings.Split(string(output), "\n")
-	packages := make([]string, 0, len(lines)/2)
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		var pkg Package
-		if err := json.Unmarshal([]byte(line), &pkg); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal package info: %w", err)
-		}
-		if !strings.HasSuffix(pkg.ImportPath, ".test") {
-			continue
-		}
-		if excludeRegex != nil && excludeRegex.MatchString(pkg.ImportPath) {
-			continue
-		}
-		relPath, err := filepath.Rel(cwd, pkg.Dir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get relative path for %s: %w", pkg.Dir, err)
-		}
-		packages = append(packages, relPath)
+	args := []string{"list", "-json=Dir,ImportPath,TestGoFiles,XTestGoFiles", "--"}
+	for _, p := range patterns {
+		args = append(args, normalizePattern(p))
 	}
-	return packages, err
+	cmd := exec.Command("go", args...)
+	cmd.Dir = cwd
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run go list: %w: %s", err, stderr.String())
+	}
+
+	var packages []Package
+	seen := make(map[string]bool)
+	dec := json.NewDecoder(strings.NewReader(string(output)))
+	for {
+		var p goListPackage
+		if err := dec.Decode(&p); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("failed to decode go list output: %w", err)
+		}
+		if len(p.TestGoFiles)+len(p.XTestGoFiles) == 0 {
+			continue
+		}
+		rel, err := filepath.Rel(cwd, p.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get relative path for %s: %w", p.Dir, err)
+		}
+		rel = filepath.ToSlash(rel)
+		if exclude != nil && (exclude.MatchString(p.ImportPath) || exclude.MatchString(rel)) {
+			continue
+		}
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+
+		pkg := Package{Dir: rel, ImportPath: p.ImportPath}
+		for _, f := range slices.Concat(p.TestGoFiles, p.XTestGoFiles) {
+			pkg.TestFiles = append(pkg.TestFiles, filepath.Join(p.Dir, f))
+		}
+		packages = append(packages, pkg)
+	}
+	slices.SortFunc(packages, func(a, b Package) int { return strings.Compare(a.Dir, b.Dir) })
+	return packages, nil
+}
+
+func normalizePattern(p string) string {
+	if filepath.IsAbs(p) || p == "." || p == ".." ||
+		strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../") {
+		return p
+	}
+	if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+		return "./" + p
+	}
+	return p
 }

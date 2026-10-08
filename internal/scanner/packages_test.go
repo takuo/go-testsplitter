@@ -2,78 +2,89 @@ package scanner
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"slices"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestScanPackages(t *testing.T) {
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+// setupModule creates a module with packages:
+//
+//	pkg1 (test), pkg2 (test), pkg2/subpkg (external test only), notest (no test), tagged (test only with build tag)
+func setupModule(t *testing.T) string {
+	t.Helper()
 	baseDir := t.TempDir()
+	writeFile(t, filepath.Join(baseDir, "go.mod"), "module example.com/testpkg\n\ngo 1.21\n")
+	writeFile(t, filepath.Join(baseDir, "pkg1", "pkg1.go"), "package pkg1\n")
+	writeFile(t, filepath.Join(baseDir, "pkg1", "pkg1_test.go"), "package pkg1\n")
+	writeFile(t, filepath.Join(baseDir, "pkg2", "pkg2.go"), "package pkg2\n")
+	writeFile(t, filepath.Join(baseDir, "pkg2", "pkg2_test.go"), "package pkg2\n")
+	writeFile(t, filepath.Join(baseDir, "pkg2", "subpkg", "subpkg.go"), "package subpkg\n")
+	writeFile(t, filepath.Join(baseDir, "pkg2", "subpkg", "subpkg_test.go"), "package subpkg_test\n")
+	writeFile(t, filepath.Join(baseDir, "notest", "notest.go"), "package notest\n")
+	writeFile(t, filepath.Join(baseDir, "tagged", "tagged.go"), "package tagged\n")
+	writeFile(t, filepath.Join(baseDir, "tagged", "tagged_test.go"), "//go:build integration\n\npackage tagged\n")
+	return baseDir
+}
 
-	// サブディレクトリ作成
-	pkg1 := filepath.Join(baseDir, "pkg1")
-	pkg2 := filepath.Join(baseDir, "pkg2")
-	subpkg := filepath.Join(pkg2, "subpkg")
-	require.NoError(t, os.MkdirAll(pkg1, 0o755))
-	require.NoError(t, os.MkdirAll(subpkg, 0o755))
+func dirs(pkgs []Package) []string {
+	var ds []string
+	for _, p := range pkgs {
+		ds = append(ds, p.Dir)
+	}
+	return ds
+}
 
-	// Goファイル作成
-	require.NoError(t, os.WriteFile(filepath.Join(pkg1, "pkg1.go"), []byte("package pkg1\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(pkg1, "pkg1_test.go"), []byte("package pkg1\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(pkg2, "pkg2.go"), []byte("package pkg2\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(pkg2, "pkg2_test.go"), []byte("package pkg2\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(subpkg, "subpkg.go"), []byte("package subpkg\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(subpkg, "subpkg_test.go"), []byte("package subpkg\n"), 0o644))
-
+func TestListPackages(t *testing.T) {
+	baseDir := setupModule(t)
 	t.Chdir(baseDir)
-	os.WriteFile(filepath.Join(baseDir, "main.go"), []byte(`package main
-import (
-_ "example.com/testpkg/pkg1"
-_ "example.com/testpkg/pkg2"
-_ "example.com/testpkg/pkg2/subpkg"
-)
-func main() {}
-`), 0o644)
 
-	cmd := exec.Command("go", "mod", "init", "example.com/testpkg")
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to initialize go module: %s", output)
-	cmd = exec.Command("go", "mod", "tidy")
-	output, err = cmd.CombinedOutput()
-	require.NoError(t, err, "Failed to tidy go module: %s", output)
+	t.Run("scan all", func(t *testing.T) {
+		got, err := ListPackages([]string{"./..."}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"pkg1", "pkg2", "pkg2/subpkg"}, dirs(got))
+		assert.Equal(t, "example.com/testpkg/pkg1", got[0].ImportPath)
+		assert.Equal(t, []string{filepath.Join(baseDir, "pkg2", "subpkg", "subpkg_test.go")}, got[2].TestFiles)
+	})
 
-	// 除外パターンなし
-	got, err := ScanPackages("")
+	t.Run("exclude", func(t *testing.T) {
+		got, err := ListPackages([]string{"./..."}, regexp.MustCompile("subpkg"))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"pkg1", "pkg2"}, dirs(got))
+	})
+
+	t.Run("import paths", func(t *testing.T) {
+		got, err := ListPackages([]string{"example.com/testpkg/pkg2", "example.com/testpkg/pkg1"}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"pkg1", "pkg2"}, dirs(got))
+	})
+
+	t.Run("bare relative directories", func(t *testing.T) {
+		got, err := ListPackages([]string{"pkg2/subpkg", "./pkg1", "pkg1"}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"pkg1", "pkg2/subpkg"}, dirs(got))
+	})
+
+	t.Run("unknown package", func(t *testing.T) {
+		_, err := ListPackages([]string{"example.com/testpkg/nonexistent"}, nil)
+		assert.Error(t, err)
+	})
+}
+
+func TestListPackages_FromSubdirectory(t *testing.T) {
+	baseDir := setupModule(t)
+	t.Chdir(filepath.Join(baseDir, "pkg2"))
+
+	got, err := ListPackages([]string{"./..."}, nil)
 	require.NoError(t, err)
-	want := []string{
-		filepath.Join("pkg1"),
-		filepath.Join("pkg2"),
-		filepath.Join("pkg2", "subpkg"),
-	}
-	slices.Sort(got)
-	slices.Sort(want)
-	assert.Equal(t, want, got)
-
-	// 除外パターンあり
-	got, err = ScanPackages("subpkg")
-	require.NoError(t, err)
-	want = []string{
-		filepath.Join("pkg1"),
-		filepath.Join("pkg2"),
-	}
-	slices.Sort(got)
-	slices.Sort(want)
-	assert.Equal(t, want, got)
-
-	// サブディレクトリから実行した場合はカレントディレクトリからの相対パス
-	t.Chdir(pkg2)
-	got, err = ScanPackages("")
-	require.NoError(t, err)
-	want = []string{".", "subpkg"}
-	slices.Sort(got)
-	assert.Equal(t, want, got)
+	// Relative to the current directory, not the module root
+	assert.Equal(t, []string{".", "subpkg"}, dirs(got))
 }
