@@ -19,6 +19,8 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
 testsplitter -s -n 4 --dry-run
 # write the split plan as JSON
 testsplitter -s -n 4 --plan plan.json -- -test.timeout=20m
+# run only tests affected by changes since the merge base with origin/main (e.g. in pull requests)
+testsplitter -s -n 4 --changed-since origin/main -- -test.timeout=20m
 ```
 
 ### Install
@@ -43,6 +45,8 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
   | -t, --template=FILE         | (built-in)          | Template file for test scripts                                               |                       |
   | --default-duration=DURATION | 0 (median)          | Duration assumed for tests without previous results. 0 uses the median of known durations (5s if none) |  |
   | --seed=UINT                 | 1                   | Random seed for splitting. The same input and seed produce the same scripts  |                       |
+  | --changed-since=REV         | (none)              | Run only tests of packages affected by changes since the merge base of REV and HEAD |                |
+  | --run-all-on=REGEX          | `(^\|/)go[.](mod\|sum\|work)$` | With `--changed-since`, run all tests if a changed file path (relative to the repository root) matches. `''` to disable |  |
   | --max-age=DURATION          | 0 (no limit)        | Ignore previous results older than this duration (e.g. `720h`)               |                       |
   | -p, --binaries-dir=DIR      | ./test-bin          | Path to test binaries, to output or pre-built                                | {{.BinariesDir}}      |
   | -b, --build-concurrency=INT | 4                   | Number of packages built in parallel (`go test -p`)                          |                       |
@@ -78,6 +82,18 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
   * Tests are run via gotestsum, and JSONL files are output as `[JSON DIR]/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl`, then merged into `test-[NODE INDEX].jsonl` even if some tests failed. The script exits with the failure status
   * Scripts of node indexes no longer generated (e.g. `test-node-7.sh` after reducing `-n` from 8 to 4) are removed
 * Logs are written to stderr in `key=value` format. `--dry-run` and `--plan -` write to stdout
+
+### Running only affected tests
+
+With `--changed-since REV`, only tests of packages affected by the changes since the merge base of `REV` and `HEAD` are split into scripts, and only their test binaries are built.
+
+* Changed files are committed and uncommitted changes since the merge base, including deleted, renamed and untracked files (`git diff --name-only --no-renames` and `git ls-files --others`)
+* A file belongs to a package if it is in the package directory, under its `testdata` directory, or embedded with `//go:embed`
+* A package is selected if its test binary depends on a changed package (including test-only imports), using `go list -deps -test`
+* If a changed file matches `--run-all-on` (by default `go.mod`, `go.sum` and `go.work`), all packages are selected
+* Dependencies not visible in the import graph (e.g. files read by relative paths outside the package, external services) are not detected. Running all tests on the main branch is recommended
+* `--dry-run` and `--plan` show which packages are selected and why
+* The base revision must be fetched, e.g. `fetch-depth: 0` with `actions/checkout`
 
 ### Template variables
 

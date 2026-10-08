@@ -20,6 +20,8 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
 testsplitter -s -n 4 --dry-run
 # 分割結果を JSON で出力
 testsplitter -s -n 4 --plan plan.json -- -test.timeout=20m
+# origin/main とのマージベースからの変更の影響を受けるテストだけを実行 (PR など)
+testsplitter -s -n 4 --changed-since origin/main -- -test.timeout=20m
 ```
 
 ### インストール
@@ -44,6 +46,8 @@ Linux / macOS 向けのビルド済みバイナリは [Releases](https://github.
   | -t, --template=FILE          | (組み込み)           | テストスクリプトのテンプレートファイル                               |                          |
   | --default-duration=DURATION  | 0 (中央値)           | 過去結果がないテストの想定実行時間。0 の場合は既知の実行時間の中央値 (結果が全くなければ 5s) |  |
   | --seed=UINT                  | 1                    | 分割の乱数シード。同じ入力とシードなら常に同じスクリプトを生成        |                          |
+  | --changed-since=REV          | (なし)               | REV と HEAD のマージベース以降の変更の影響を受けるパッケージのテストだけを実行 |              |
+  | --run-all-on=REGEX           | `(^\|/)go[.](mod\|sum\|work)$` | `--changed-since` 指定時、変更ファイルのパス (リポジトリルートからの相対パス) が一致したら全テストを実行。`''` で無効化 |  |
   | --max-age=DURATION           | 0 (無制限)           | この期間より古い過去結果を無視 (例: `720h`)                           |                          |
   | -p, --binaries-dir=DIR       | ./test-bin           | テストバイナリの出力/事前ビルド先                                   | {{ .BinariesDir }}       |
   | -b, --build-concurrency=INT  | 4                    | 並列にビルドするパッケージ数 (`go test -p`)                          |                          |
@@ -80,6 +84,18 @@ Linux / macOS 向けのビルド済みバイナリは [Releases](https://github.
   * 生成対象外になったノードのスクリプト (例: `-n` を 8 から 4 に減らしたときの `test-node-7.sh`) は削除
 * ログは標準エラー出力に `key=value` 形式で出力。`--dry-run` と `--plan -` は標準出力に出力
 * テストスクリプトは CI などで NODE_INDEX ごとに分散して実行する
+
+### 変更の影響を受けるテストだけを実行
+
+`--changed-since REV` を指定すると、`REV` と `HEAD` のマージベース以降の変更の影響を受けるパッケージのテストだけをスクリプトに分割し、そのテストバイナリだけをビルドします。
+
+* 変更ファイルはマージベース以降のコミット済み・未コミットの変更 (削除、リネーム、未追跡ファイルを含む。`git diff --name-only --no-renames` と `git ls-files --others`)
+* ファイルは、パッケージディレクトリ直下、その `testdata` 配下、または `//go:embed` で埋め込まれている場合にそのパッケージに属する
+* テストバイナリが変更パッケージに依存している (テストでのみ import する場合を含む) パッケージを選択 (`go list -deps -test`)
+* 変更ファイルが `--run-all-on` (デフォルトは `go.mod`, `go.sum`, `go.work`) に一致した場合は全パッケージを選択
+* import グラフに現れない依存 (パッケージ外のファイルを相対パスで読む、外部サービスなど) は検出できないため、main ブランチでは全テストの実行を推奨
+* `--dry-run` と `--plan` で、どのパッケージがなぜ選択されたかを確認可能
+* ベースのリビジョンを fetch しておく必要あり (例: `actions/checkout` の `fetch-depth: 0`)
 
 ### テンプレート変数
 
