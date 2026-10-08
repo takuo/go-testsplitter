@@ -6,12 +6,12 @@
 ### 使い方
 
 ```bash
-# 基本的な使い方
-go list ./... | ./testsplitter -n 4 -- -test.timeout=20m
+# 基本的な使い方 (標準入力でインポートパスまたは相対ディレクトリを渡す)
+go list ./... | testsplitter -n 4 -- -test.timeout=20m
 # パッケージ自動スキャン
 testsplitter -s -n 4 -- -test.timeout=20m
-# パッケージ除外 (`-s` 時のみ)
-testsplitter -s -x "TestSomething|TestUnnecessaryCI" -n 4 -- -test.timeout=20m
+# パッケージ除外 (インポートパスまたはディレクトリに対する正規表現)
+testsplitter -s -x "/e2e$|/tools/" -n 4 -- -test.timeout=20m
 # カスタムスクリプトテンプレート
 testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
 ```
@@ -20,27 +20,31 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
 
   | オプション                    | デフォルト           | 説明                                                                 | テンプレート変数         |
   |------------------------------|----------------------|----------------------------------------------------------------------|--------------------------|
-  | -n, --nodes=INT              | 4                    | テスト実行ノード数。テンプレート内で {{ .NodeIndex }} で参照可能      |        |
+  | -n, --nodes=INT              | 4                    | テスト実行ノード数                                                    | {{ .NodeIndex }}         |
   | -c, --concurrency=INT        | 4                    | 各ノード内での並列実行プロセス数                                            | {{ .Concurrency }}       |
   | -o, --scripts-dir=DIR        | ./test-scripts       | スクリプトの出力ディレクトリ                                         |                          |
   | -s, --scan-packages          | (標準入力)           | パッケージリストをスキャン。指定しない場合は標準入力から受け取る      |                          |
-  | -x, --exclude=PATTERN        | (なし)               | `-s` 指定時に除外するパッケージの正規表現                               |                          |
+  | -x, --exclude=PATTERN        | (なし)               | 除外するパッケージの正規表現 (インポートパスとディレクトリに対して評価) |                          |
   | -j, --json-dir=DIR           | ./test-json          | 過去のテスト結果(JSONL) (`go test -json` 出力)のディレクトリ                      | {{ .JSONDir }}         |
   | -m, --max-functions          | 0 (無制限)           | 1プロセスあたりの最大テスト関数の数                                    |                          |
   | -t, --template=FILE          | (組み込み)           | テストスクリプトのテンプレートファイル                               |                          |
+  | --default-duration=DURATION  | 0 (中央値)           | 過去結果がないテストの想定実行時間。0 の場合は既知の実行時間の中央値 (結果が全くなければ 5s) |  |
+  | --seed=UINT                  | 1                    | 分割の乱数シード。同じ入力とシードなら常に同じスクリプトを生成        |                          |
   | -p, --binaries-dir=DIR       | ./test-bin           | テストバイナリの出力/事前ビルド先                                   | {{ .BinariesDir }}       |
   | -b, --build-concurrency=INT  | 4                    | テストバイナリのビルド並列数                                         |                          |
   | -d, --disable-build          | (ビルド有効)         | テストバイナリをビルドせず、事前ビルド済みを利用                     |                          |
-  | -- ...                       | (なし)               | テストバイナリに渡す追加引数 (例: -test.v -test.timeout=20m)         |                          |
+  | -- ...                       | (なし)               | テストバイナリに渡す追加引数 (例: -test.v -test.timeout=20m)         | {{ .Flags }}, {{ .TestFlags }} |
 
 ### 概要
 
 * 標準入力（`go list ./...` の出力）からテストパッケージリストを受け取る
-  * 受け取ったパッケージをASTで解析し、実行対象のテスト関数リストを取得
-  * `-s --scan` 指定時はカレントディレクトリ配下の全パッケージが対象
-    * `-s` では `-x --exclude PATTERN` で除外パッケージ指定も可能
+  * 各行はインポートパス (`github.com/foo/bar/api`) またはカレントディレクトリからの相対ディレクトリ (`api`, `./api`)
+  * パッケージは `go list` で解決し、テストファイルを AST で解析 (ビルド制約を考慮) してトップレベルの `TestXxx(t *testing.T)` 関数リストを取得
+  * `-s --scan-packages` 指定時はカレントディレクトリ配下の全パッケージ (`./...`) が対象
+  * `-x --exclude PATTERN` で除外パッケージ指定が可能
 * 過去の実行結果は `-j` で指定したディレクトリ配下のJSONL(`go test -json`)を再帰的に読み込む
-  * 過去結果にないテストは実行時間を暫定的に5秒として適切に分散
+  * 過去結果にないテストは既知の実行時間の中央値 (または `--default-duration`) として分散
+* 分割結果は決定的で、同じパッケージ・過去結果・`--seed` なら常に同じスクリプトを生成
 * テストバイナリは自動で事前ビルドされ、`./test-bin` に出力される (`-p`オプションで変更可能)
   * `-b` オプションで並列ビルド数を指定可能
   * `-d` オプション指定時はビルドをしないので、別途事前にビルドしておく必要がある `./test-bin` ディレクトリに `foo.bar.test` のように配置
@@ -49,10 +53,25 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   * パッケージ単位でコマンドを分割 例: `./test-bin/foo.bar.test -test.v -test.timeout=20m -test.run "^TestFooBar|TestHogeMoge$"`
     * 同一パッケージが複数ノードで実行される場合もあるが、`-test.run` で関数単位で実行するため重複実行は回避
     * 一つのプロセスで実行するテスト関数の数を制限可能 (`-m`)
-  * ノード内並列実行には `xargs -P` を利用
+  * ノード内並列実行には `xargs -0 -P` を利用
+  * テストが失敗しても各ノードの JSONL は `test-[NODE INDEX].jsonl` にマージされ、スクリプトは失敗ステータスで終了
   * テストは `gotestsum` 経由で実行し、JSONL出力レポートは `./test-json/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl` 形式で出力
     * `./test-json` は `-j` で指定したディレクトリ
   * `-t` オプションで独自テンプレートも利用可能
+
+### テンプレート変数
+
+| 変数 | 型 | 説明 |
+|------|----|------|
+| `{{.NodeIndex}}` | int | ノード番号 (0 始まり) |
+| `{{.Concurrency}}` | int | `-c` の値 |
+| `{{.TestLines}}` | []TestLine | テストプロセスの起動単位。`.Index` (1 始まり), `.Package` (カレントディレクトリからの相対ディレクトリ), `.TestPattern` (`^(TestA\|TestB)$`) を持つ |
+| `{{.JSONDir}}` | string | `-j` の絶対パス |
+| `{{.BinariesDir}}` | string | `-p` の絶対パス |
+| `{{.Flags}}` | string | テストフラグをスペースで連結した文字列 (クォートなし) |
+| `{{.TestFlags}}` | []string | テストフラグ |
+
+`shquote` 関数で文字列をシェル用にクォートできます。例: `{{range .TestFlags}}{{shquote .}} {{end}}`
 * テストスクリプトは `./test-scripts/test-node-$NODE_INDEX.sh` のように出力されるので、CI などでは NODE_INDEX ごとに分散して実行する
 
 ## 例
@@ -73,7 +92,7 @@ jobs:
 
     working_directory: /home/circleci/project
     docker:
-      - image: cimg/go:1.24
+      - image: cimg/go:1.27
     resource_class: xlarge
 
     steps:
