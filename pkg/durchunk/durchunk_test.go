@@ -147,3 +147,9 @@ func TestSplitBalanced_SubSecond(t *testing.T) {
 	assert.Equal(t, 2100*time.Millisecond, total)
 	assert.LessOrEqual(t, hi-lo, 10*time.Millisecond, "lo=%v hi=%v", lo, hi)
 }
+
+func TestSplitBalanced_InvalidChunkCount(t *testing.T) {
+	data := map[string]time.Duration{"a": time.Second}
+	assert.Nil(t, SplitBalanced(maps.All(data), 0))
+	assert.Nil(t, SplitBalanced(maps.All(data), -1))
+}

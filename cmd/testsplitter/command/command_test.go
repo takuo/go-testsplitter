@@ -14,6 +14,26 @@ import (
 	"github.com/takuo/go-testsplitter/internal/types"
 )
 
+func TestValidate(t *testing.T) {
+	valid := CLI{Nodes: 1, Concurrency: 1, BuildConcurrency: 1}
+	require.NoError(t, valid.Validate())
+
+	cases := map[string]func(c *CLI){
+		"nodes":             func(c *CLI) { c.Nodes = 0 },
+		"concurrency":       func(c *CLI) { c.Concurrency = 0 },
+		"build-concurrency": func(c *CLI) { c.BuildConcurrency = 0 },
+		"max-functions":     func(c *CLI) { c.MaxFunctions = -1 },
+		"exclude":           func(c *CLI) { c.Exclude = "(" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := valid
+			mutate(&c)
+			assert.ErrorContains(t, c.Validate(), name)
+		})
+	}
+}
+
 func TestCreateTestInfos(t *testing.T) {
 	cli := &CLI{
 		testFunctions: map[string][]string{

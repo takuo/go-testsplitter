@@ -82,3 +82,10 @@ func TestMainIntegration(t *testing.T) {
 		})
 	}
 }
+
+func TestInvalidArguments(t *testing.T) {
+	binary := buildBinary(t)
+	out, err := exec.Command(binary, "-n", "0", "-d").CombinedOutput()
+	require.Error(t, err)
+	assert.Contains(t, string(out), "--nodes must be >= 1")
+}

@@ -38,7 +38,11 @@ type entry struct {
 // - 合計時間を均等化
 // - 要素数に制約なし（最低1個以上）
 // - 同じ入力順序とシードなら常に同じ結果
+// - chunkCount < 1 の場合は nil を返す
 func SplitBalanced(data iter.Seq2[string, time.Duration], chunkCount int, opts ...Option) []Chunk {
+	if chunkCount < 1 {
+		return nil
+	}
 	o := options{seed: DefaultSeed}
 	for _, opt := range opts {
 		opt(&o)

@@ -3,6 +3,7 @@ package command
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io/fs"
 	"iter"
@@ -54,13 +55,33 @@ type CLI struct {
 	template      string                    `kong:"-"`
 }
 
+// Validate validates the command line arguments (called by kong).
+func (c *CLI) Validate() error {
+	var errs []error
+	if c.Nodes < 1 {
+		errs = append(errs, errors.New("--nodes must be >= 1"))
+	}
+	if c.Concurrency < 1 {
+		errs = append(errs, errors.New("--concurrency must be >= 1"))
+	}
+	if c.BuildConcurrency < 1 {
+		errs = append(errs, errors.New("--build-concurrency must be >= 1"))
+	}
+	if c.MaxFunctions < 0 {
+		errs = append(errs, errors.New("--max-functions must be >= 0"))
+	}
+	if c.Exclude != "" {
+		if _, err := regexp.Compile(c.Exclude); err != nil {
+			errs = append(errs, fmt.Errorf("invalid --exclude pattern: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (c *CLI) listPackages() error {
 	var exclude *regexp.Regexp
 	if c.Exclude != "" {
-		var err error
-		if exclude, err = regexp.Compile(c.Exclude); err != nil {
-			return fmt.Errorf("invalid exclude pattern: %w", err)
-		}
+		exclude = regexp.MustCompile(c.Exclude) // validated in Validate
 	}
 
 	patterns := []string{"./..."}
