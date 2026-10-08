@@ -168,19 +168,25 @@ func (c *CLI) loadTestDurations() (err error) {
 			return nil
 		}
 
-		fp, err := os.OpenFile(path, os.O_RDONLY, 0)
+		data, err := parseJSONFile(path)
 		if err != nil {
 			log.Printf("Failed to read %s: %v\n", path, err)
-			return nil // Skip files that can't be read
 		}
-		defer fp.Close()
-		data := parser.ParseGoTestJSONL(bufio.NewScanner(fp))
 		files++
 		maps.Copy(c.testDurations, data)
 		return nil
 	})
 	log.Printf("Loaded %d testcases durations from %d files in %s\n", len(c.testDurations), files, c.JSONDir)
 	return err
+}
+
+func parseJSONFile(path string) (map[string]time.Duration, error) {
+	fp, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fp.Close()
+	return parser.ParseGoTestJSONL(fp)
 }
 
 func (c *CLI) createTestInfos() {
