@@ -2,7 +2,7 @@
 experimental = true
 
 [tools]
-go = "1.24"
+go = "1.27"
 gotestsum = "latest"
 gofumpt = "latest"
 "go:golang.org/x/tools/gopls" = "latest"
