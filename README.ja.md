@@ -1,5 +1,7 @@
 # 説明
 
+[![CI](https://github.com/takuo/go-testsplitter/actions/workflows/ci.yml/badge.svg)](https://github.com/takuo/go-testsplitter/actions/workflows/ci.yml)
+
 過去のテスト実行時間に基づいて、多数のテストを複数ノードに分散して実行するスクリプトを出力します。
 また、スクリプトで実行するテストバイナリを内部で事前ビルドします。
 
@@ -14,7 +16,19 @@ testsplitter -s -n 4 -- -test.timeout=20m
 testsplitter -s -x "/e2e$|/tools/" -n 4 -- -test.timeout=20m
 # カスタムスクリプトテンプレート
 testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
+# ビルドやスクリプト出力をせずに分割結果を確認
+testsplitter -s -n 4 --dry-run
+# 分割結果を JSON で出力
+testsplitter -s -n 4 --plan plan.json -- -test.timeout=20m
 ```
+
+### インストール
+
+```bash
+go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+```
+
+Linux / macOS 向けのビルド済みバイナリは [Releases](https://github.com/takuo/go-testsplitter/releases) から取得できます。
 
 ## オプション
 
@@ -31,8 +45,12 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
   | --default-duration=DURATION  | 0 (中央値)           | 過去結果がないテストの想定実行時間。0 の場合は既知の実行時間の中央値 (結果が全くなければ 5s) |  |
   | --seed=UINT                  | 1                    | 分割の乱数シード。同じ入力とシードなら常に同じスクリプトを生成        |                          |
   | -p, --binaries-dir=DIR       | ./test-bin           | テストバイナリの出力/事前ビルド先                                   | {{ .BinariesDir }}       |
-  | -b, --build-concurrency=INT  | 4                    | テストバイナリのビルド並列数                                         |                          |
+  | -b, --build-concurrency=INT  | 4                    | 並列にビルドするパッケージ数 (`go test -p`)                          |                          |
   | -d, --disable-build          | (ビルド有効)         | テストバイナリをビルドせず、事前ビルド済みを利用                     |                          |
+  | --dry-run                    | (無効)               | テストバイナリのビルドやスクリプト出力をせず、分割結果を表示         |                          |
+  | --plan=FILE                  | (なし)               | 分割結果を JSON で FILE に出力 (`-` で標準出力)                      |                          |
+  | -q, --quiet                  | (無効)               | 警告とエラーのみ出力                                                 |                          |
+  | --verbose                    | (無効)               | デバッグログを出力                                                   |                          |
   | -- ...                       | (なし)               | テストバイナリに渡す追加引数 (例: -test.v -test.timeout=20m)         | {{ .Flags }}, {{ .TestFlags }} |
 
 ### 概要
@@ -48,6 +66,9 @@ testsplitter -s -t custom.sh.tmpl -n 4 -- -test.timeout=20m
 * テストバイナリは自動で事前ビルドされ、`./test-bin` に出力される (`-p`オプションで変更可能)
   * `-b` オプションで並列ビルド数を指定可能
   * `-d` オプション指定時はビルドをしないので、別途事前にビルドしておく必要がある `./test-bin` ディレクトリに `foo.bar.test` のように配置
+* テストバイナリは 1 回の `go test -c` でまとめてビルド (バイナリのベース名が衝突する場合のみ分割)
+* 生成対象外になったノードのスクリプト (例: `-n` を 8 から 4 に減らしたときの `test-node-7.sh`) は削除
+* ログは標準エラー出力に `key=value` 形式で出力。`--dry-run` と `--plan -` は標準出力に出力
 * 組み込みテンプレート: `internal/templates/test-node.sh.tmpl`
   * 対象パッケージのテストバイナリは事前ビルド済み（`go test` ではなく）を利用する、テスト実行時はパッケージディレクトリに移動
   * パッケージ単位でコマンドを分割 例: `./test-bin/foo.bar.test -test.v -test.timeout=20m -test.run "^TestFooBar|TestHogeMoge$"`
@@ -187,4 +208,22 @@ workflows:
             - test:
               - success
               - failed
+```
+
+## 開発
+
+ツールは [mise](https://mise.jdx.dev/) で管理しています (`mise install`)。
+
+```bash
+go test ./...        # E2E テストには gotestsum が必要
+golangci-lint run
+```
+
+### リリース
+
+`v*` タグを push すると、[Release ワークフロー](.github/workflows/release.yml) が GoReleaser でバイナリを公開します。
+
+```bash
+git tag v0.x.y
+git push origin v0.x.y
 ```
