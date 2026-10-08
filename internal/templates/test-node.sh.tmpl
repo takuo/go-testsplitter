@@ -2,35 +2,51 @@
 
 set -euo pipefail
 
-LINES=$(cat <<'EOF'
-{{range .TestLines}}{{.Package}} '{{.TestPattern}}'
-{{end}}EOF
+CWD="$(pwd)"
+export JSON_DIR={{shquote .JSONDir}}
+export REPORT_DIR="${CWD}/test-reports"
+mkdir -p "$JSON_DIR" "$REPORT_DIR"
+
+export PATH={{shquote .BinariesDir}}:"$PATH"
+
+# run_test INDEX PACKAGE_DIR TEST_PATTERN
+run_test() {
+  local count="$1" pkg="$2" pattern="$3"
+  local bin="${pkg//\//.}.test"
+  local json="${JSON_DIR}/test-{{.NodeIndex}}-${count}.jsonl"
+  local report="${REPORT_DIR}/junit-{{.NodeIndex}}-${count}.xml"
+  local flags=({{range .TestFlags}}{{shquote .}} {{end}})
+
+  echo "[${count}] ${pkg}: -test.run ${pattern}"
+  cd "$pkg" && gotestsum -f standard-verbose \
+    --jsonfile "$json" \
+    --packages "$pkg" \
+    --rerun-fails \
+    --junitfile "$report" \
+    --junitfile-testsuite-name relative \
+    --junitfile-testcase-classname relative \
+    --raw-command -- go tool test2json -t -p "$pkg" "$bin" "${flags[@]}" -test.v=test2json -test.run "$pattern"
+}
+export -f run_test
+
+# INDEX PACKAGE_DIR TEST_PATTERN
+TESTS=(
+{{- range .TestLines}}
+  {{.Index}} {{shquote .Package}} {{shquote .TestPattern}}
+{{- end}}
 )
 
-FLAGS="{{.Flags}}"
-CWD="$(pwd)"
-count=0
-commands=()
+status=0
+if (( ${#TESTS[@]} > 0 )); then
+  printf '%s\0' "${TESTS[@]}" | xargs -0 -n 3 -P {{.Concurrency}} bash -c 'run_test "$@"' _ || status=$?
+fi
 
-export PATH="{{.BinariesDir}}:$PATH"
+# Merge JSON results even if some tests failed
+shopt -s nullglob
+parts=("${JSON_DIR}"/test-{{.NodeIndex}}-*.jsonl)
+if (( ${#parts[@]} > 0 )); then
+  cat "${parts[@]}" > "${JSON_DIR}/test-{{.NodeIndex}}.jsonl"
+  rm -f "${parts[@]}"
+fi
 
-while IFS= read -r line; do
-  if [ -z "$line" ]; then
-    continue
-  fi
-  count=$((count + 1))
-  report="${CWD}/test-reports/junit-{{.NodeIndex}}-${count}.xml"
-  json="{{.JSONDir}}/test-{{.NodeIndex}}-${count}.jsonl"
-  pkg="${line%% *}"
-  bin="${pkg//\//.}.test"
-  runs="${line#$pkg }"
-
-  CMD="cd ${pkg} && gotestsum -f standard-verbose --jsonfile ${json} --packages ${pkg} --rerun-fails --junitfile ${report} --junitfile-testsuite-name relative --junitfile-testcase-classname relative --raw-command -- go tool test2json -t -p ${pkg} ${bin} ${FLAGS} -test.v=test2json -test.run ${runs}"
-  echo "$CMD"
-  commands+=("$CMD")
-done <<< "$LINES"
-
-printf "\"%s\"\n" "${commands[@]}" | xargs -I {} -P {{.Concurrency}} bash -c '{}'
-
-cat {{.JSONDir}}/test-{{.NodeIndex}}-*.jsonl > {{.JSONDir}}/test-{{.NodeIndex}}.jsonl || true
-rm {{.JSONDir}}/test-{{.NodeIndex}}-*.jsonl || true
+exit "$status"

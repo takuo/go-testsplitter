@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/takuo/go-testsplitter/internal/parser"
+	"github.com/takuo/go-testsplitter/internal/types"
 )
 
 var update = flag.Bool("update", false, "update golden files")
@@ -83,9 +87,78 @@ func TestMainIntegration(t *testing.T) {
 	}
 }
 
+func TestScanPackagesWithExclude(t *testing.T) {
+	binary := buildBinary(t)
+	dir := filepath.Join(testdataDir(t), "example")
+	outputDir := t.TempDir()
+
+	runSplitter(t, binary, dir, "", "-d", "-s", "-x", "pkg2$", "-n", "1", "-o", outputDir, "-j", t.TempDir())
+
+	b, err := os.ReadFile(filepath.Join(outputDir, "test-node-0.sh"))
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "'pkg1'")
+	assert.Contains(t, string(b), "'pkg3'")
+	assert.NotContains(t, string(b), "'pkg2'")
+}
+
 func TestInvalidArguments(t *testing.T) {
 	binary := buildBinary(t)
 	out, err := exec.Command(binary, "-n", "0", "-d").CombinedOutput()
 	require.Error(t, err)
 	assert.Contains(t, string(out), "--nodes must be >= 1")
+}
+
+// TestEndToEnd builds test binaries, runs all generated scripts, and checks that every test ran exactly once.
+func TestEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	if _, err := exec.LookPath("gotestsum"); err != nil {
+		t.Skip("gotestsum is not installed")
+	}
+	const nodes = 3
+	binary := buildBinary(t)
+
+	// Copy example packages into an isolated module so that outputs don't pollute testdata
+	work := t.TempDir()
+	src := filepath.Join(testdataDir(t), "example")
+	require.NoError(t, os.CopyFS(work, os.DirFS(src)))
+	require.NoError(t, os.WriteFile(filepath.Join(work, "go.mod"), []byte("module example\n\ngo 1.21\n"), 0o644))
+
+	runSplitter(t, binary, work, "", "-s", "-n", strconv.Itoa(nodes), "-c", "2", "-m", "1", "--", "-test.count=1")
+
+	for i := range nodes {
+		script := filepath.Join(work, "test-scripts", "test-node-"+strconv.Itoa(i)+".sh")
+		cmd := exec.Command("bash", script)
+		cmd.Dir = work
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s failed: %s", script, out)
+	}
+
+	// Merged results only, no leftovers
+	ran := make(map[types.TestKey]int)
+	require.NoError(t, filepath.WalkDir(filepath.Join(work, "test-json"), func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		if d.IsDir() {
+			return nil
+		}
+		assert.Regexp(t, `test-\d+\.jsonl$`, path)
+		fp, err := os.Open(path)
+		require.NoError(t, err)
+		defer fp.Close()
+		durations, err := parser.ParseGoTestJSONL(fp)
+		require.NoError(t, err)
+		for k := range durations {
+			ran[k]++
+		}
+		return nil
+	}))
+	assert.Len(t, ran, 12)
+	for k, n := range ran {
+		assert.Equal(t, 1, n, "%v ran %d times", k, n)
+	}
+
+	reports, err := filepath.Glob(filepath.Join(work, "test-reports", "junit-*.xml"))
+	require.NoError(t, err)
+	assert.NotEmpty(t, reports)
 }

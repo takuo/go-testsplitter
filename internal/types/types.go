@@ -1,8 +1,8 @@
+// Package types provides types shared between testsplitter packages.
 package types
 
 import (
 	"encoding/xml"
-	"iter"
 	"time"
 )
 
@@ -51,7 +51,7 @@ type TestInfo struct {
 	Duration time.Duration
 }
 
-// NodeTest represents a test assigned to a specific node
+// NodeTest represents tests assigned to a specific node
 type NodeTest struct {
 	NodeIndex     int
 	TotalDuration time.Duration
@@ -59,22 +59,25 @@ type NodeTest struct {
 	Packages []string
 	// Funcs maps package to its test functions.
 	Funcs map[string][]string
-	Flags string
 }
 
 // TemplateData represents data for the script template
 type TemplateData struct {
 	NodeIndex   int
 	Concurrency int
-	TestLines   iter.Seq[TestLine]
+	TestLines   []TestLine
 	JSONDir     string
 	BinariesDir string
-	Flags       string
+	// Flags is the test flags joined with spaces (not shell-quoted).
+	Flags string
+	// TestFlags is the raw list of test flags. Use with the shquote template function.
+	TestFlags []string
 }
 
-// TestLine represents a single line in the test script
+// TestLine represents a single test process invocation in the test script
 type TestLine struct {
+	// Index is the 1-origin sequence number in the node.
+	Index       int
 	Package     string
 	TestPattern string
-	Flags       string
 }

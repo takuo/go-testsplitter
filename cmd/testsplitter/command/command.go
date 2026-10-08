@@ -5,8 +5,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"iter"
 	"log"
 	"maps"
 	"os"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/sourcegraph/conc/pool"
+
 	"github.com/takuo/go-testsplitter/internal/parser"
 	"github.com/takuo/go-testsplitter/internal/scanner"
 	"github.com/takuo/go-testsplitter/internal/templates"
@@ -32,16 +33,16 @@ const fallbackDuration = 5 * time.Second
 
 // CLI main command line interface
 type CLI struct {
-	Nodes           int           `short:"n" long:"nodes" required:"" default:"4" help:"Number of nodes"`
+	Nodes           int           `short:"n" long:"nodes" default:"4" help:"Number of nodes"`
 	Concurrency     int           `short:"c" long:"concurrency" default:"4" help:"Number of concurrent test executions per node"`
-	ScriptsDir      string        `short:"o" long:"scripts-dir" required:"" default:"./test-scripts" help:"Directory to output generated scripts"`
+	ScriptsDir      string        `short:"o" long:"scripts-dir" default:"./test-scripts" help:"Directory to output generated scripts"`
 	ScanPackages    bool          `short:"s" long:"scan-packages" help:"Scan Go packages under the current directory (go list ./...). If not specified, package list (import paths or directories) is read from stdin."`
 	Exclude         string        `short:"x" long:"exclude" help:"Regex pattern to exclude packages, matched against import paths and directories"`
 	JSONDir         string        `short:"j" long:"json-dir" default:"./test-json" help:"Directory containing go test -json results"`
 	Template        string        `short:"t" long:"template" help:"Path to the template file (optional)"`
-	MaxFunctions    int           `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per package (0: unlimited)"`
-	Seed            uint64        `long:"seed" default:"1" help:"Random seed for splitting (the same input and seed produce the same scripts)"`
+	MaxFunctions    int           `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per test process (0: unlimited)"`
 	DefaultDuration time.Duration `long:"default-duration" default:"0s" help:"Duration assumed for tests without previous results (0: median of known durations, or 5s)"`
+	Seed            uint64        `long:"seed" default:"1" help:"Random seed for splitting (the same input and seed produce the same scripts)"`
 	TestFlags       []string      `arg:"" help:"Flags to pass to the test binary after --" optional:""`
 
 	BinariesDir      string `short:"p" long:"binaries-dir" default:"./test-bin" help:"Directory to output or containing test binaries"`
@@ -51,11 +52,12 @@ type CLI struct {
 	Version kong.VersionFlag `short:"v" long:"version" help:"Print version and exit"`
 
 	// Runtime context
+	stdin         io.Reader                       `kong:"-"`
 	packages      []scanner.Package               `kong:"-"`
 	testFunctions map[string][]string             `kong:"-"`
 	testDurations map[types.TestKey]time.Duration `kong:"-"`
 	testInfos     []types.TestInfo                `kong:"-"`
-	nodeTests     iter.Seq[*types.NodeTest]       `kong:"-"`
+	nodeTests     []*types.NodeTest               `kong:"-"`
 	template      string                          `kong:"-"`
 }
 
@@ -85,6 +87,39 @@ func (c *CLI) Validate() error {
 	return errors.Join(errs...)
 }
 
+// Run run the command line
+func (c *CLI) Run() error {
+	if err := c.listPackages(); err != nil {
+		return err
+	}
+	if !c.DisableBuild {
+		if err := c.buildTestBinaries(); err != nil {
+			return fmt.Errorf("failed to build test binaries: %w", err)
+		}
+	}
+	if err := c.scanTestFunctions(); err != nil {
+		return fmt.Errorf("failed to parse test functions: %w", err)
+	}
+
+	// Load previous test results
+	if err := c.loadTestDurations(); err != nil {
+		log.Printf("Warning: Failed to load test durations: %v", err)
+	}
+
+	c.createTestInfos()
+	c.splitTests()
+
+	if err := c.loadTemplate(); err != nil {
+		return fmt.Errorf("failed to load template: %w", err)
+	}
+	if err := c.generateScriptFiles(); err != nil {
+		return fmt.Errorf("failed to generate script files: %w", err)
+	}
+
+	fmt.Printf("Generated %d test script files in %s\n", c.Nodes, c.ScriptsDir)
+	return nil
+}
+
 func (c *CLI) listPackages() error {
 	var exclude *regexp.Regexp
 	if c.Exclude != "" {
@@ -108,61 +143,26 @@ func (c *CLI) listPackages() error {
 	return nil
 }
 
-// Run run the command line
-func (c *CLI) Run() error {
-	if err := c.listPackages(); err != nil {
-		return err
+func (c *CLI) loadTemplate() error {
+	if c.Template == "" {
+		c.template = templates.ScriptTemplate()
+		return nil
 	}
-	if !c.DisableBuild {
-		if err := c.buildTestBinaries(); err != nil {
-			return fmt.Errorf("failed to build test binaries: %w", err)
-		}
+	data, err := os.ReadFile(c.Template)
+	if err != nil {
+		return fmt.Errorf("failed to read template file: %w", err)
 	}
-	// Parse test functions from packages
-	if err := c.scanTestFunctions(); err != nil {
-		return fmt.Errorf("failed to parse test functions: %w", err)
-	}
-
-	// Load previous test results
-	if err := c.loadTestDurations(); err != nil {
-		log.Printf("Warning: Failed to load test durations: %v", err)
-	}
-
-	// Create test info with durations
-	c.createTestInfos()
-
-	// Split tests across nodes
-	c.splitTests()
-
-	// テンプレートファイルの読み込み（指定があれば）
-	if err := c.loadTemplate(); err != nil {
-		return fmt.Errorf("failed to load template: %w", err)
-	}
-
-	if err := c.generateScriptFiles(); err != nil {
-		return fmt.Errorf("failed to generate script files: %w", err)
-	}
-
-	fmt.Printf("Generated %d test script files in %s\n", c.Nodes, c.ScriptsDir)
+	c.template = string(data)
 	return nil
 }
 
-func (c *CLI) loadTemplate() (err error) {
-	if c.Template != "" {
-		data, err := os.ReadFile(c.Template)
-		if err != nil {
-			return fmt.Errorf("failed to read template file: %w", err)
-		}
-		c.template = string(data)
-	} else {
-		c.template = templates.ScriptTemplate()
-	}
-	return
-}
-
 func (c *CLI) readPackagesFromStdin() ([]string, error) {
+	r := c.stdin
+	if r == nil {
+		r = os.Stdin
+	}
 	var packages []string
-	sc := bufio.NewScanner(os.Stdin)
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		if pkg := strings.TrimSpace(sc.Text()); pkg != "" {
 			packages = append(packages, pkg)
@@ -173,19 +173,25 @@ func (c *CLI) readPackagesFromStdin() ([]string, error) {
 
 func (c *CLI) scanTestFunctions() (err error) {
 	c.testFunctions, err = scanner.ScanTestFunctions(c.packages)
-	return
+	return err
 }
 
-func (c *CLI) loadTestDurations() (err error) {
+func (c *CLI) loadTestDurations() error {
 	var files int
 
 	c.testDurations = make(map[types.TestKey]time.Duration)
 
-	err = filepath.WalkDir(c.JSONDir, func(path string, _ fs.DirEntry, err error) error {
+	err := filepath.WalkDir(c.JSONDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // Skip files that can't be accessed
+			if errors.Is(err, fs.ErrNotExist) && path == c.JSONDir {
+				return fs.SkipAll // no previous results
+			}
+			log.Printf("Skipping %s: %v", path, err)
+			return nil
 		}
-
+		if d.IsDir() {
+			return nil
+		}
 		switch filepath.Ext(path) {
 		case ".jsonl", ".json":
 		default:
@@ -194,13 +200,13 @@ func (c *CLI) loadTestDurations() (err error) {
 
 		data, err := parseJSONFile(path)
 		if err != nil {
-			log.Printf("Failed to read %s: %v\n", path, err)
+			log.Printf("Failed to read %s: %v", path, err)
 		}
 		files++
 		maps.Copy(c.testDurations, data)
 		return nil
 	})
-	log.Printf("Loaded %d testcases durations from %d files in %s\n", len(c.testDurations), files, c.JSONDir)
+	log.Printf("Loaded %d testcases durations from %d files in %s", len(c.testDurations), files, c.JSONDir)
 	return err
 }
 
@@ -233,8 +239,9 @@ func (c *CLI) createTestInfos() {
 	def := c.defaultDuration()
 	c.testInfos = nil
 
+	pkgs := slices.Sorted(maps.Keys(c.testFunctions))
 	unknown := 0
-	for _, pkg := range slices.Sorted(maps.Keys(c.testFunctions)) {
+	for _, pkg := range pkgs {
 		for _, fn := range c.testFunctions[pkg] {
 			key := types.TestKey{Package: pkg, Function: fn}
 			duration, ok := c.testDurations[key]
@@ -251,120 +258,122 @@ func (c *CLI) createTestInfos() {
 }
 
 func (c *CLI) splitTests() {
-	dataSeq := func(yield func(types.TestKey, time.Duration) bool) {
+	data := func(yield func(types.TestKey, time.Duration) bool) {
 		for _, test := range c.testInfos {
 			if !yield(test.TestKey, test.Duration) {
 				return
 			}
 		}
 	}
-	chunks := durchunk.SplitBalanced(dataSeq, c.Nodes, durchunk.WithSeed(c.Seed))
-	c.nodeTests = func(yield func(*types.NodeTest) bool) {
-		for i, chunk := range chunks {
-			nt := &types.NodeTest{
-				NodeIndex:     i,
-				Funcs:         make(map[string][]string),
-				Flags:         strings.Join(c.TestFlags, " "),
-				TotalDuration: chunk.Total,
-			}
-			for _, key := range chunk.Keys {
-				if _, ok := nt.Funcs[key.Package]; !ok {
-					nt.Packages = append(nt.Packages, key.Package)
-				}
-				nt.Funcs[key.Package] = append(nt.Funcs[key.Package], key.Function)
-			}
-			if !yield(nt) {
-				return
-			}
+	chunks := durchunk.SplitBalanced(data, c.Nodes, durchunk.WithSeed(c.Seed))
+
+	c.nodeTests = make([]*types.NodeTest, 0, len(chunks))
+	for i, chunk := range chunks {
+		nt := &types.NodeTest{
+			NodeIndex:     i,
+			Funcs:         make(map[string][]string),
+			TotalDuration: chunk.Total,
 		}
+		for _, key := range chunk.Keys {
+			if _, ok := nt.Funcs[key.Package]; !ok {
+				nt.Packages = append(nt.Packages, key.Package)
+			}
+			nt.Funcs[key.Package] = append(nt.Funcs[key.Package], key.Function)
+		}
+		c.nodeTests = append(c.nodeTests, nt)
 	}
 }
 
+func (c *CLI) testLines(nt *types.NodeTest) []types.TestLine {
+	var lines []types.TestLine
+	for _, pkg := range nt.Packages {
+		funcs := nt.Funcs[pkg]
+		size := c.MaxFunctions
+		if size <= 0 {
+			size = len(funcs)
+		}
+		for chunk := range slices.Chunk(funcs, size) {
+			lines = append(lines, types.TestLine{
+				Index:       len(lines) + 1,
+				Package:     pkg,
+				TestPattern: "^(" + strings.Join(chunk, "|") + ")$",
+			})
+		}
+	}
+	return lines
+}
+
 func (c *CLI) generateScriptFiles() error {
-	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(c.ScriptsDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Parse template
-	tmpl, err := template.New("test-node.sh").Parse(string(c.template))
+	tmpl, err := template.New("test-node.sh").Funcs(templates.FuncMap()).Parse(c.template)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	for nt := range c.nodeTests {
+	binariesDir, err := filepath.Abs(c.BinariesDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute binary path: %w", err)
+	}
+	jsonDir, err := filepath.Abs(c.JSONDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute JSON directory: %w", err)
+	}
+
+	for _, nt := range c.nodeTests {
 		numOfFuncs := 0
 		for _, funcs := range nt.Funcs {
 			numOfFuncs += len(funcs)
 		}
 		filename := filepath.Join(c.ScriptsDir, fmt.Sprintf("test-node-%d.sh", nt.NodeIndex))
-		log.Printf("Generating script: %v (TotalFuncs: %v, TotalDuration: %s)...\n", filename, numOfFuncs, nt.TotalDuration)
+		log.Printf("Generating script: %v (TotalFuncs: %v, TotalDuration: %s)...", filename, numOfFuncs, nt.TotalDuration)
 
-		file, err := os.Create(filename)
-		if err != nil {
-			return fmt.Errorf("failed to create file %s: %w", filename, err)
-		}
-		defer file.Close()
-
-		// Prepare template data
-		linesSeq := func(yield func(tl types.TestLine) bool) {
-			for _, pkg := range nt.Packages {
-				funcs := nt.Funcs[pkg]
-				if c.MaxFunctions > 0 {
-					for funcs := range slices.Chunk(funcs, c.MaxFunctions) {
-						if !yield(types.TestLine{
-							Package:     pkg,
-							TestPattern: "^(" + strings.Join(funcs, "|") + ")$",
-							Flags:       nt.Flags,
-						}) {
-							return
-						}
-					}
-				} else {
-					if !yield(types.TestLine{
-						Package:     pkg,
-						TestPattern: "^(" + strings.Join(funcs, "|") + ")$",
-						Flags:       nt.Flags,
-					}) {
-						return
-					}
-				}
-			}
-		}
-
-		path, err := filepath.Abs(c.BinariesDir)
-		if err != nil {
-			return fmt.Errorf("failed to get absolute binary path: %w", err)
-		}
-		JSONDir, err := filepath.Abs(c.JSONDir)
-		if err != nil {
-			return fmt.Errorf("failed to get absolute JSON directory: %w", err)
-		}
-		templateData := types.TemplateData{
+		data := types.TemplateData{
 			NodeIndex:   nt.NodeIndex,
 			Concurrency: c.Concurrency,
-			TestLines:   linesSeq,
+			TestLines:   c.testLines(nt),
 			Flags:       strings.Join(c.TestFlags, " "),
-			JSONDir:     strings.TrimSuffix(JSONDir, "/"),
-			BinariesDir: strings.TrimSuffix(path, "/"),
+			TestFlags:   c.TestFlags,
+			JSONDir:     jsonDir,
+			BinariesDir: binariesDir,
 		}
-
-		// Execute template
-		if err := tmpl.Execute(file, templateData); err != nil {
-			return fmt.Errorf("failed to execute template: %w", err)
-		}
-
-		// Make the script executable
-		if err := file.Chmod(0o755); err != nil {
-			return fmt.Errorf("failed to make script executable: %w", err)
+		if err := writeScript(filename, tmpl, data); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
-// BuildTestBinaries builds test binaries for all target packages into the output directory.
-// The binary name is generated by replacing "/" with "." and appending ".test".
+func writeScript(filename string, tmpl *template.Template, data types.TemplateData) (err error) {
+	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", filename, err)
+	}
+	defer func() {
+		if cerr := file.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("failed to close %s: %w", filename, cerr)
+		}
+	}()
+
+	if err := tmpl.Execute(file, data); err != nil {
+		return fmt.Errorf("failed to execute template for %s: %w", filename, err)
+	}
+	// Ensure executable even if the file already existed with other permissions
+	if err := file.Chmod(0o755); err != nil {
+		return fmt.Errorf("failed to make %s executable: %w", filename, err)
+	}
+	return nil
+}
+
+// binaryName returns the test binary name for the package directory.
+// e.g. api/service/foo → api.service.foo.test
+func binaryName(dir string) string {
+	return strings.ReplaceAll(dir, "/", ".") + ".test"
+}
+
+// buildTestBinaries builds test binaries for all target packages into the binaries directory.
 func (c *CLI) buildTestBinaries() error {
 	log.Printf("Building test binaries for %d packages with concurrency %d.\n", len(c.packages), c.BuildConcurrency)
 	p := pool.New().WithErrors().WithMaxGoroutines(c.BuildConcurrency)
@@ -377,13 +386,10 @@ func (c *CLI) buildTestBinaries() error {
 	if err != nil {
 		return fmt.Errorf("failed to get current working directory: %w", err)
 	}
-	// 例: api/service/foo → api.service.foo.test
 	for _, pkg := range c.packages {
 		p.Go(func() error {
-			binName := strings.ReplaceAll(pkg.Dir, "/", ".") + ".test"
-			outputPath := filepath.Join(outputPath, binName)
+			outputPath := filepath.Join(outputPath, binaryName(pkg.Dir))
 			log.Printf("Building %s as %s...\n", pkg.Dir, outputPath)
-			outputPath, _ = filepath.Abs(outputPath)
 			cmd := exec.Command("go", "test", "-c", "-o", outputPath, ".")
 			cmd.Dir = filepath.Join(cwd, pkg.Dir)
 			output, err := cmd.CombinedOutput()
