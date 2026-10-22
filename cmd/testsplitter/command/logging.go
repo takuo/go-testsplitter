@@ -6,10 +6,18 @@ import (
 )
 
 func (c *CLI) logLevel() slog.Level {
+	return logLevelFor(c.Quiet, c.Verbose)
+}
+
+func (a *ArchiveCmd) logLevel() slog.Level {
+	return logLevelFor(a.Quiet, a.Verbose)
+}
+
+func logLevelFor(quiet, verbose bool) slog.Level {
 	switch {
-	case c.Quiet:
+	case quiet:
 		return slog.LevelWarn
-	case c.Verbose:
+	case verbose:
 		return slog.LevelDebug
 	default:
 		return slog.LevelInfo

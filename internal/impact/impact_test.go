@@ -43,10 +43,19 @@ func Plain() int { return 0 }
 `,
 	"usea/usea_test.go": `package usea
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestUseA(t *testing.T) { UseA() }
 func TestPlain(t *testing.T) { Plain() }
+func FuzzUseA(f *testing.F)  { UseA() }
+
+func ExampleUseA() {
+	fmt.Println(UseA())
+	// Output: 1
+}
 `,
 	"useb/useb.go": `package useb
 
@@ -224,7 +233,8 @@ func TestAnalyze(t *testing.T) {
 		"changing a constant selects its users only": {
 			changes: map[string]string{"constant/constant.go": replace(baseFiles["constant/constant.go"], "const A = 1", "const A = 10")},
 			want: map[string][]string{
-				"usea":     {"TestUseA"},
+				// fuzz targets and examples are selected like tests
+				"usea":     {"ExampleUseA", "FuzzUseA", "TestUseA"},
 				"shape":    {"TestTotal"}, // square.area uses A, reached via NewSquare
 				"cmd/tool": {"ALL"},       // main depends on A
 			},
@@ -294,7 +304,11 @@ func TestAnalyze(t *testing.T) {
 func TestAnalyze_Origins(t *testing.T) {
 	res := analyze(t, map[string]string{"constant/constant.go": replace(baseFiles["constant/constant.go"], "const A = 1", "const A = 10")})
 	require.Contains(t, res.Selections, mod+"/usea")
-	assert.Equal(t, map[string]string{"TestUseA": mod + "/constant.A"}, res.Selections[mod+"/usea"].Functions)
+	assert.Equal(t, map[string]string{
+		"TestUseA":    mod + "/constant.A",
+		"FuzzUseA":    mod + "/constant.A",
+		"ExampleUseA": mod + "/constant.A",
+	}, res.Selections[mod+"/usea"].Functions)
 }
 
 // replace replaces old in s with new, panicking if old is not found.

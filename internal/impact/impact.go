@@ -329,7 +329,7 @@ func (a *analyzer) result(affected map[sym]sym) *Analysis {
 		}
 		if sel == nil {
 			for s, origin := range affected {
-				if (s.pkg == c || s.pkg == c+"_test") && strings.HasPrefix(s.local, "Test") && !strings.Contains(s.local, ".") {
+				if (s.pkg == c || s.pkg == c+"_test") && isTestFuncName(s.local) {
 					if sel == nil {
 						sel = &Selection{Functions: make(map[string]string)}
 					}
@@ -342,6 +342,17 @@ func (a *analyzer) result(affected map[sym]sym) *Analysis {
 		}
 	}
 	return res
+}
+
+// isTestFuncName reports whether local is the name of a top-level function which may be run by
+// `go test`: a test, a fuzz target or an example. Methods ("(T).M") are not. Names which are not
+// actually run (e.g. an example without an output comment) are dropped later, when the selected
+// tests are intersected with the test functions found by the scanner.
+func isTestFuncName(local string) bool {
+	if strings.Contains(local, ".") {
+		return false
+	}
+	return strings.HasPrefix(local, "Test") || strings.HasPrefix(local, "Fuzz") || strings.HasPrefix(local, "Example")
 }
 
 // refGraph is the reference graph of top-level declarations in the main module.

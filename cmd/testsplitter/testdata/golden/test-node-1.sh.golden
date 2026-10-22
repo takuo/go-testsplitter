@@ -15,6 +15,8 @@ run_test() {
   local json="${JSON_DIR}/test-1-${count}.jsonl"
   local report="${REPORT_DIR}/junit-1-${count}.xml"
   local flags=('-test.timeout=20m' '-test.v' )
+  # Rerun failed tests (gotestsum --rerun-fails), disabled unless testsplitter --rerun-fails is given
+  local rerun=()
   # Use test2json built by testsplitter if available, so that the Go toolchain is not required
   local test2json=(go tool test2json)
   if [[ -x "${BINARIES_DIR}/test2json" ]]; then
@@ -25,10 +27,10 @@ run_test() {
   cd "$pkg" && gotestsum -f standard-verbose \
     --jsonfile "$json" \
     --packages "$pkg" \
-    --rerun-fails \
     --junitfile "$report" \
     --junitfile-testsuite-name relative \
     --junitfile-testcase-classname relative \
+    "${rerun[@]}" \
     --raw-command -- "${test2json[@]}" -t -p "$pkg" "$bin" "${flags[@]}" -test.v=test2json -test.run "$pattern"
 }
 export -f run_test
@@ -37,7 +39,7 @@ export -f run_test
 TESTS=(
   1 'example/pkg2' 'example.pkg2.test' '^(TestReverse|TestReverseEmpty)$'
   2 'example/pkg1' 'example.pkg1.test' '^(TestAdd|TestMultiply|TestMultiplyZero)$'
-  3 'example/pkg3' 'example.pkg3.test' '^(TestAbsPositive|TestMin)$'
+  3 'example/pkg3' 'example.pkg3.test' '^(FuzzAbs|TestAbsPositive|TestMin)$'
 )
 
 status=0

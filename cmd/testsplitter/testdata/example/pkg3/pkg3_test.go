@@ -1,6 +1,8 @@
 package pkg3
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -53,4 +55,23 @@ func TestAbsPositive(t *testing.T) {
 	if result != 5 {
 		t.Errorf("Expected 5, got %d", result)
 	}
+}
+
+func ExampleMax() {
+	fmt.Println(Max(5, 3))
+	// Output: 5
+}
+
+// ExampleMin has no output comment, so `go test` compiles it without running it.
+func ExampleMin() {
+	fmt.Println(Min(5, 3))
+}
+
+func FuzzAbs(f *testing.F) {
+	f.Add(-5)
+	f.Fuzz(func(t *testing.T, x int) {
+		if x != math.MinInt && Abs(x) < 0 {
+			t.Errorf("Abs(%d) is negative", x)
+		}
+	})
 }

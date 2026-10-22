@@ -20,8 +20,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/alecthomas/kong"
-
 	"github.com/takuo/go-testsplitter/internal/parser"
 	"github.com/takuo/go-testsplitter/internal/scanner"
 	"github.com/takuo/go-testsplitter/internal/templates"
@@ -51,6 +49,7 @@ type CLI struct {
 	MaxFunctions    int           `short:"m" long:"max-functions" default:"0" help:"Maximum number of test functions per test process (0: unlimited)"`
 	DefaultDuration time.Duration `long:"default-duration" default:"0s" help:"Duration assumed for tests without previous results (0: median of known durations, or 5s)"`
 	Seed            uint64        `long:"seed" default:"1" help:"Random seed for splitting (the same input and seed produce the same scripts)"`
+	RerunFails      int           `long:"rerun-fails" default:"0" help:"Rerun failed tests up to this many times in the generated scripts (gotestsum --rerun-fails, 0: no rerun)"`
 	TestFlags       []string      `arg:"" help:"Flags to pass to the test binary after --" optional:""`
 
 	BinariesDir      string `short:"p" long:"binaries-dir" default:"./test-bin" help:"Directory to output or containing test binaries"`
@@ -62,8 +61,6 @@ type CLI struct {
 
 	Quiet   bool `short:"q" long:"quiet" xor:"verbosity" help:"Print only warnings and errors"`
 	Verbose bool `long:"verbose" xor:"verbosity" help:"Print debug logs"`
-
-	Version kong.VersionFlag `short:"v" long:"version" help:"Print version and exit"`
 
 	// Runtime context
 	stdin           io.Reader                       `kong:"-"`
@@ -95,6 +92,9 @@ func (c *CLI) Validate() error {
 	}
 	if c.MaxFunctions < 0 {
 		errs = append(errs, errors.New("--max-functions must be >= 0"))
+	}
+	if c.RerunFails < 0 {
+		errs = append(errs, errors.New("--rerun-fails must be >= 0"))
 	}
 	if c.MaxAge < 0 {
 		errs = append(errs, errors.New("--max-age must be >= 0"))
@@ -529,6 +529,7 @@ func (c *CLI) generateScriptFiles(tmpl *template.Template) error {
 			TestLines:   c.testLines(nt),
 			Flags:       strings.Join(c.TestFlags, " "),
 			TestFlags:   c.TestFlags,
+			RerunFails:  c.RerunFails,
 			JSONDir:     jsonDir,
 			BinariesDir: binariesDir,
 		}

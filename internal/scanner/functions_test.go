@@ -33,18 +33,56 @@ func TestGeneric[T any](t *testing.T) {}
 func (s *Suite) TestMethod(t *testing.T) {}
 func BenchmarkExample(b *testing.B) {}
 func helperFunction() {}
+
+func FuzzExample(f *testing.F) {}
+func FuzzDotImported(f *F)     {}
+func Fuzzy(f *testing.F)       {}
+func FuzzNoArgs()              {}
+
+func ExampleWithOutput() {
+	// Output: ok
+}
+
+func ExampleEmptyOutput() {
+	// Output:
+}
+
+func ExampleUnordered() {
+	// Unordered output:
+	// a
+	// b
+}
+
+// ExampleNoOutput is only compiled, not run, because it has no output comment.
+func ExampleNoOutput() {}
+
+func Exampleunexported() {
+	// Output: ok
+}
+
+func ExampleWithArgs(t *testing.T) {
+	// Output: ok
+}
 `)
 	writeFile(t, external, `package example_test
 
 import "testing"
 
 func TestExternal(t *testing.T) {}
+
+func Example() {
+	// Output: ok
+}
 `)
 
 	got, err := ScanTestFunctions([]Package{{Dir: "example", TestFiles: []string{internal, external}}})
 	require.NoError(t, err)
 	assert.Equal(t, map[string][]string{
-		"example": {"Test", "TestAnother", "TestExample", "TestExternal", "Test_underscore"},
+		"example": {
+			"Example", "ExampleEmptyOutput", "ExampleUnordered", "ExampleWithOutput",
+			"FuzzDotImported", "FuzzExample",
+			"Test", "TestAnother", "TestExample", "TestExternal", "Test_underscore",
+		},
 	}, got)
 }
 

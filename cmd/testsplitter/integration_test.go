@@ -119,7 +119,7 @@ func TestDryRunAndPlan(t *testing.T) {
 
 	assert.Empty(t, stderr.String(), "quiet mode prints no info logs")
 	assert.Contains(t, stdout.String(), "NODE  TESTS  PROCESSES  ESTIMATED")
-	assert.Contains(t, stdout.String(), "Total 12 tests")
+	assert.Contains(t, stdout.String(), "Total 14 tests")
 	assert.NoDirExists(t, scripts, "dry-run must not write scripts")
 	assert.NoDirExists(t, filepath.Join(work, "bin"), "dry-run must not build binaries")
 
@@ -132,7 +132,7 @@ func TestDryRunAndPlan(t *testing.T) {
 		} `json:"nodes"`
 	}
 	require.NoError(t, json.Unmarshal(b, &plan))
-	assert.Equal(t, 12, plan.TotalTests)
+	assert.Equal(t, 14, plan.TotalTests)
 	assert.Len(t, plan.Nodes, 2)
 
 	// --plan - with --dry-run prints only JSON to stdout
@@ -202,7 +202,7 @@ func TestEndToEnd(t *testing.T) {
 		}
 		return nil
 	}))
-	assert.Len(t, ran, 12)
+	assert.Len(t, ran, 14) // 12 tests, one fuzz target and one runnable example
 	for k, n := range ran {
 		assert.Equal(t, 1, n, "%v ran %d times", k, n)
 	}
@@ -210,6 +210,22 @@ func TestEndToEnd(t *testing.T) {
 	reports, err := filepath.Glob(filepath.Join(work, "test-reports", "junit-*.xml"))
 	require.NoError(t, err)
 	assert.NotEmpty(t, reports)
+
+	// Archiving the results keeps them as the previous results of the next split
+	runSplitter(t, binary, work, "", "archive", "--id", "run-1")
+	assert.NoFileExists(t, filepath.Join(work, "test-json", "test-0.jsonl"), "archived results are moved")
+	archived, err := filepath.Glob(filepath.Join(work, "test-json", "runs", "run-1", "test-*.jsonl"))
+	require.NoError(t, err)
+	assert.Len(t, archived, nodes)
+	for _, path := range archived {
+		b, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.NotContains(t, string(b), `"Action":"output"`, "output events are dropped")
+	}
+
+	out := runSplitter(t, binary, work, "", "-s", "-d", "-n", strconv.Itoa(nodes), "--dry-run")
+	assert.Contains(t, out, "tests=14 files="+strconv.Itoa(nodes), "the archived results are loaded")
+	assert.NotContains(t, out, "without previous results")
 }
 
 // TestBuildCollidingNames builds packages whose `go test -c` binary names collide (a/x and b/x).

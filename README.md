@@ -4,6 +4,16 @@
 
 Outputs scripts to distribute and run a large number of tests across multiple nodes based on the previous execution time.
 
+### Assumptions
+
+This tool is for large monorepos, where tests are spread over many packages and the wall clock time of `go test ./...` is the problem. It assumes that **test functions are independent of each other**, since splitting breaks the order and the grouping they had.
+
+* Tests of a package are split across nodes and processes. A test cannot rely on another test having run before it, or on running in the same process: every run gives a package a different subset of its tests (each test still runs exactly once per run)
+* Within a process, tests run in the order of `-test.run "^(TestA|TestB)$"`, and processes run in parallel (`-c`) on all nodes at the same time. Tests sharing an external resource (a database, a fixed port, a file outside the package) can therefore collide
+* `TestMain` runs once per process, not once per package, so the setup and teardown of a package split into several processes run several times (this is the package overhead the splitter estimates and accounts for when splitting)
+* **Subtests are never split**: the `t.Run` subtests of a top-level test always run together, in the same process, in their own order. Tests which must run in a given order, or which share state, belong in subtests of one top-level test function
+* Tests which cannot be made independent can be excluded with `-x --exclude` and run in a separate job
+
 ### Usage
 
 ```bash
@@ -21,7 +31,12 @@ testsplitter -s -n 4 --dry-run
 testsplitter -s -n 4 --plan plan.json -- -test.timeout=20m
 # run only tests affected by changes since the merge base with origin/main (e.g. in pull requests)
 testsplitter -s -n 4 --changed-since origin/main -- -test.timeout=20m
+# keep the results of this run as previous results of the next split (in CI, after all nodes finished)
+testsplitter archive
 ```
+
+`split` is the default command, so `testsplitter -s -n 4` is `testsplitter split -s -n 4`.
+The other command is [`testsplitter archive`](#archiving-previous-results).
 
 ### Install
 
@@ -29,9 +44,11 @@ testsplitter -s -n 4 --changed-since origin/main -- -test.timeout=20m
 go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
 ```
 
-Pre-built binaries for Linux and macOS are available on the [releases page](https://github.com/takuo/go-testsplitter/releases).
+Go 1.26 or later is required to build from source. Pre-built binaries for Linux and macOS, which need no toolchain, are available on the [releases page](https://github.com/takuo/go-testsplitter/releases).
 
 ## Arguments
+
+Arguments of the `split` (default) command. See [Archiving previous results](#archiving-previous-results) for `testsplitter archive`.
 
   | option                      | default             | description                                                                 | variable in template  |
   |-----------------------------|---------------------|-----------------------------------------------------------------------------|-----------------------|
@@ -45,6 +62,7 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
   | -t, --template=FILE         | (built-in)          | Template file for test scripts                                               |                       |
   | --default-duration=DURATION | 0 (median)          | Duration assumed for tests without previous results. 0 uses the median of known durations (5s if none) |  |
   | --seed=UINT                 | 1                   | Random seed for splitting. The same input and seed produce the same scripts  |                       |
+  | --rerun-fails=INT           | 0 (no rerun)        | Rerun failed tests up to this many times in the generated scripts (`gotestsum --rerun-fails`) | {{.RerunFails}} |
   | --changed-since=REV         | (none)              | Run only tests of packages affected by changes since the merge base of REV and HEAD |                |
   | --granularity=GRANULARITY   | package             | With `--changed-since`, select tests by affected packages (`package`) or by affected top-level declarations (`symbol`) |  |
   | --run-all-on=REGEX          | `(^\|/)go[.](mod\|sum\|work)$` | With `--changed-since`, run all tests if a changed file path (relative to the repository root) matches. `''` to disable |  |
@@ -62,7 +80,8 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
 
 * **Packages**: receives a list of test packages from standard input (output of `go list ./...`)
   * Each line can be an import path (`github.com/foo/bar/api`) or a directory relative to the current directory (`api`, `./api`)
-  * Packages are resolved with `go list`, and test files are parsed with AST (honoring build constraints) to obtain the top-level `TestXxx(t *testing.T)` functions
+  * Packages are resolved with `go list`, and test files are parsed with AST (honoring build constraints) to obtain the top-level functions `go test` runs: `TestXxx(t *testing.T)`, `FuzzXxx(f *testing.F)` (its seed corpus is run as a test) and `ExampleXxx()` with an output comment (`// Output:`)
+  * Benchmarks, examples without an output comment and `TestMain` are not run by `go test` and are ignored
   * With `-s --scan-packages`, all packages under the current directory (`./...`) are targeted
   * Packages can be excluded using `-x --exclude PATTERN`
 * **Previous results**: recursively reads all JSONL files (`go test -json` output with package names, e.g. `test2json -p "pkgname"`) under the directory specified by `-j`
@@ -81,6 +100,7 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
   * Each process runs a test binary in the package directory with `-test.run "^(TestFoo|TestBar)$"`. The same package may run on multiple nodes, but each test runs only once
   * Processes run in parallel with `xargs -0 -P`, longest first
   * Tests are run via gotestsum, and JSONL files are output as `[JSON DIR]/test-[NODE INDEX]-[EXECUTE NUMBER].jsonl`, then merged into `test-[NODE INDEX].jsonl` even if some tests failed. The script exits with the failure status
+  * Failed tests are not rerun. With `--rerun-fails=N`, gotestsum reruns each failed test up to N times and reports them in `test-reports/rerun-[NODE INDEX]-[EXECUTE NUMBER].txt`. Note that this hides flaky tests, and the previous results then hold the duration of the last attempt
   * Scripts of node indexes no longer generated (e.g. `test-node-7.sh` after reducing `-n` from 8 to 4) are removed
 * Logs are written to stderr in `key=value` format. `--dry-run` and `--plan -` write to stdout
 
@@ -108,6 +128,36 @@ By default, all tests of affected packages are selected, so adding a constant to
 * Tests are run only through references: e.g. tests running another command built with `go build`, or calling methods by name via reflection, may be missed
 * If the analysis fails (e.g. a type error), tests are selected by package
 
+## Archiving previous results
+
+Splitting needs the previous results of **all** tests, not only of the last run: when only some tests ran (e.g. with `--changed-since`), replacing the previous results would lose the durations of the other tests. `testsplitter archive` adds the results of a run to the archived ones and keeps the archive small, so that CI only has to restore and save one directory:
+
+```bash
+# in CI, after the results of all nodes are collected into ./test-json
+testsplitter archive --id "$CI_RUN_ID" --keep 20
+```
+
+  | option                   | default                | description                                                                 |
+  |--------------------------|------------------------|-----------------------------------------------------------------------------|
+  | FILE ...                 | JSON_DIR/test-*.jsonl  | Result files to archive                                                     |
+  | -j, --json-dir=DIR       | ./test-json            | Directory containing the results of this run and the archived runs           |
+  | --runs-dir=DIR           | JSON_DIR/runs          | Directory to archive runs into                                              |
+  | --id=NAME                | (current UTC time)     | Name of the directory of this run, e.g. the CI workflow ID                  |
+  | --keep=INT               | 20                     | Number of archived runs to keep, newest first (0: keep all)                 |
+  | --max-age=DURATION       | 0 (no limit)           | Remove archived runs older than this duration (e.g. `720h`)                 |
+  | --keep-output            | (off)                  | Archive all events including test output                                    |
+  | --keep-source            | (off)                  | Keep the archived files in JSON_DIR instead of moving them                  |
+  | --dry-run                | (off)                  | Print what would be archived and removed without writing anything            |
+  | -q, --quiet              | (off)                  | Print only warnings and errors                                              |
+  | --verbose                | (off)                  | Print debug logs                                                            |
+
+* The results of this run are moved into `JSON_DIR/runs/[ID]/`, keeping their file names. The next split reads them together with the runs archived before, since `-j` is read recursively and the newest result of each test wins
+* Only the events needed for splitting are archived: the results (`pass`, `fail`, `skip`) of packages and of top-level tests. Test output, which is almost all of the bytes of `go test -json`, and subtests are dropped. The archive is still `go test -json` output, so it can be read by other tools (`--keep-output` archives everything)
+* Archived runs beyond `--keep` (newest first by directory time) and older than `--max-age` are removed
+* Run it once per CI run, after the results of all nodes are collected (e.g. in a job depending on the test jobs, which runs even if they failed). Each node writes `test-[NODE INDEX].jsonl`, so the files of parallel nodes do not collide
+* Restore the archived runs before archiving and save the whole `JSON_DIR` afterwards, so that the older runs are kept. Pass the CI run ID as `--id` to get a stable name per run
+* Files given explicitly are archived even if they are not named `test-*.jsonl`. Files of already archived runs are skipped
+
 ### Template variables
 
 | variable | type | description |
@@ -119,6 +169,7 @@ By default, all tests of affected packages are selected, so adding a constant to
 | `{{.BinariesDir}}` | string | Absolute path of `-p` |
 | `{{.Flags}}` | string | Test flags joined with spaces (not quoted) |
 | `{{.TestFlags}}` | []string | Test flags |
+| `{{.RerunFails}}` | int | `--rerun-fails` value (0 if reruns are disabled) |
 
 | TestLine field | type | description |
 |----------------|------|-------------|
@@ -226,7 +277,8 @@ jobs:
   save-test-result:
     resource_class: small
     docker:
-      - image: cimg/base:current
+      - image: cimg/go:1.27
+    working_directory: /home/circleci/project
     steps:
       # previous results
       - restore_cache:
@@ -240,18 +292,9 @@ jobs:
           at: /home/circleci/project
       - run:
           name: Archiving test results of this run
-          working_directory: /home/circleci/project/test-json
           command: |
-            run="runs/$(date +%s)-${CIRCLE_WORKFLOW_ID}"
-            mkdir -p "$run"
-            for f in test-*.jsonl; do
-              [ -e "$f" ] || continue
-              # drop output events, which are not needed for splitting
-              grep -v '"Action":"output"' "$f" > "$run/$f" || true
-              rm "$f"
-            done
-            # keep the latest 20 runs
-            ls -1d runs/*/ | sort -r | tail -n +21 | xargs -r rm -rf
+            go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+            testsplitter archive --id "$CIRCLE_WORKFLOW_ID" --keep 20
       - save_cache:
           name: Saving JSON Test Reports
           key: *test-results-cache
@@ -273,10 +316,11 @@ workflows:
 ```
 
 * Previous test results are restored only in the `build` job, where `testsplitter` reads them. The `test` job starts with an empty `test-json` and persists only the results of its node (`test-[NODE INDEX].jsonl`), so files of parallel nodes do not collide in the workspace
-* The `save-test-result` job adds the results of this run to the previous results under `test-json/runs/`, instead of replacing them. Otherwise, when only some tests run (e.g. `--changed-since`), the results of the other tests are lost. `testsplitter` reads `-j` recursively and uses the newest result of each test
+* The `save-test-result` job adds the results of this run to the previous results under `test-json/runs/`, instead of replacing them. Otherwise, when only some tests run (e.g. `--changed-since`), the results of the other tests are lost. See [Archiving previous results](#archiving-previous-results)
 * The cache keys contain `{{ epoch }}` so that a new cache is saved every time, even when re-running a workflow of the same revision. New branches fall back to the results of `main`
 * `when: always` saves test reports and results even if tests fail
-* Use `--max-age` to ignore old results, and adjust the number of runs kept (`tail -n +21`)
+* The `cimg/go` image is only used to `go install testsplitter`; with the [pre-built binary](https://github.com/takuo/go-testsplitter/releases) a slim image is enough
+* Keep fewer runs with `--keep`; `archive --max-age` removes old runs, and `split --max-age` ignores old results
 
 ### Running only affected tests in pull requests (CircleCI)
 
@@ -339,6 +383,183 @@ Replace the `Building test binaries` step above to run all tests on `main` and `
     BASE=$(gh pr view "$CIRCLE_PULL_REQUEST" --json baseRefName -q .baseRefName) || BASE=""
   fi
   ```
+
+### .github/workflows/test.yml (GitHub Actions)
+
+```yaml
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  TEST_PARALLELISM: 6
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      nodes: ${{ steps.split.outputs.nodes }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Restoring previous test results
+        uses: actions/cache/restore@v4
+        with:
+          path: test-json
+          key: test-results-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            test-results-${{ github.ref_name }}-
+            test-results-main-
+      - name: Building test binaries
+        id: split
+        env:
+          GOGC: "off"
+          CGO_ENABLED: "0"
+        run: |
+          go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+          testsplitter -s -n "$TEST_PARALLELISM" -b 4 -c 4 -m 20 \
+            --plan plan.json -- -test.timeout=10m
+          # Only the nodes which got tests, so that no job runs an empty script
+          echo "nodes=$(jq -c '[.nodes[] | select(.processes | length > 0) | .index]' plan.json)" >> "$GITHUB_OUTPUT"
+      - name: Saving test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-bin
+          path: |
+            test-bin
+            test-scripts
+          retention-days: 1
+
+  test:
+    needs: build
+    if: needs.build.outputs.nodes != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(needs.build.outputs.nodes) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Installing gotestsum
+        run: go install gotest.tools/gotestsum@latest
+      - name: Restoring test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: test-bin
+      - name: Execute test
+        env:
+          GOGC: "300"
+        run: |
+          # Artifacts do not keep the executable bit
+          chmod +x test-bin/* test-scripts/*.sh
+          bash ./test-scripts/test-node-${{ matrix.node }}.sh
+      - name: Saving test json output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-json-${{ matrix.node }}
+          path: test-json
+      - name: Saving test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.node }}
+          path: test-reports
+
+  save-test-result:
+    needs: [build, test]
+    if: always() && needs.build.result == 'success' && needs.build.outputs.nodes != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+      # previous results
+      - name: Restoring previous test results
+        uses: actions/cache/restore@v4
+        with:
+          path: test-json
+          key: test-results-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            test-results-${{ github.ref_name }}-
+            test-results-main-
+      # results of this run (test-json/test-[NODE INDEX].jsonl of every node)
+      - name: Collecting test results of this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-json-*
+          merge-multiple: true
+          path: test-json
+      - name: Archiving test results of this run
+        run: testsplitter archive --id "${{ github.run_id }}-${{ github.run_attempt }}" --keep 20
+      - name: Saving JSON test reports
+        uses: actions/cache/save@v4
+        with:
+          path: test-json
+          key: test-results-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+```
+
+* The `test` matrix is built from the `--plan` JSON, so nodes which got no test (e.g. with `--changed-since`) start no job
+* Previous test results are restored only where they are read or written, never in the `test` jobs, so that each node uploads the results of its own node (`test-[NODE INDEX].jsonl`) and the artifacts can be merged with `merge-multiple`
+* An exact `key` which is never saved, with `restore-keys` prefixes, restores the newest matching cache: a cache is immutable, so a new one is saved for every run (`github.run_id`), and branches fall back to the results of `main`. Caches of a pull request are restorable only in its own runs and those of the base branch
+* `save-test-result` depends on the test jobs with `if: always()`, so the results are archived even if tests failed. See [Archiving previous results](#archiving-previous-results)
+* The scripts hold the absolute paths of `-j` and `-p`, which match because GitHub-hosted runners check out the repository at the same path in every job
+* The `test` job needs only `gotestsum`, since `test2json` is built into `test-bin`. Installing it with `go install` is the simplest way, but the [pre-built binary](https://github.com/gotestyourself/gotestsum/releases) avoids the Go toolchain
+
+### Running only affected tests in pull requests (GitHub Actions)
+
+Check out the full history and replace the `Building test binaries` step above to run all tests on `main`, and only tests affected by the changes in pull requests.
+
+```yaml
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the merge base must be in the clone
+      # ... setup-go and the cache steps ...
+      - name: Building test binaries
+        id: split
+        env:
+          GOGC: "off"
+          CGO_ENABLED: "0"
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          go install github.com/takuo/go-testsplitter/cmd/testsplitter@latest
+
+          SELECT=()
+          if [ -n "${BASE_REF:-}" ]; then
+            SELECT=(--changed-since "origin/${BASE_REF}" --granularity symbol)
+          fi
+
+          testsplitter -s -n "$TEST_PARALLELISM" -b 4 -c 4 -m 20 \
+            "${SELECT[@]}" --plan plan.json -- -test.timeout=10m
+          echo "nodes=$(jq -c '[.nodes[] | select(.processes | length > 0) | .index]' plan.json)" >> "$GITHUB_OUTPUT"
+```
+
+* `BASE_REF` is set only for `pull_request` events, so all tests run on `main`. To run all tests, omit `--changed-since` rather than using `--run-all-on '.*'`: `--run-all-on` matches changed files, so it selects no tests when nothing is changed
+* `pull_request` events check out the merge commit of the pull request, whose first parent is the base branch. The merge base of `origin/$BASE_REF` and `HEAD` is then the tip of the base branch, and exactly the changes of the pull request are compared
+* `fetch-depth: 0` fetches all branches and the full history, which the merge base needs. In a large repository, check out shallow and fetch only the base commit instead:
+  ```yaml
+      - uses: actions/checkout@v7
+      - name: Fetching the base commit of the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --depth=1 --no-tags origin "$BASE_SHA"
+  ```
+  and pass `--changed-since "$BASE_SHA"` in the split step, with `BASE_SHA` in its `env` too. The merge base is not in a shallow clone, so the changes are compared with `base.sha` directly: commits pushed to the base branch after the pull request was last synchronized are also included, and extra tests may run
+* Values from the event are passed through `env` instead of being interpolated into the script, so that a branch name cannot inject shell code
+* `permissions: contents: read` is enough; no token is needed to find the base branch, unlike CircleCI
 
 ## Development
 

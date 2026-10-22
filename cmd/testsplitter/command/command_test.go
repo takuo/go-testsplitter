@@ -32,6 +32,7 @@ func TestValidate(t *testing.T) {
 		"concurrency":       func(c *CLI) { c.Concurrency = 0 },
 		"build-concurrency": func(c *CLI) { c.BuildConcurrency = 0 },
 		"max-functions":     func(c *CLI) { c.MaxFunctions = -1 },
+		"rerun-fails":       func(c *CLI) { c.RerunFails = -1 },
 		"max-age":           func(c *CLI) { c.MaxAge = -time.Second },
 		"default-duration":  func(c *CLI) { c.DefaultDuration = -time.Second },
 		"exclude":           func(c *CLI) { c.Exclude = "(" },
@@ -238,11 +239,36 @@ func TestGenerateScriptFiles(t *testing.T) {
 		contentStr := string(content)
 		assert.True(t, strings.HasPrefix(contentStr, "#!/bin/bash\n"))
 		assert.Contains(t, contentStr, `local flags=('-test.timeout=20m' '-test.run=it'\''s quoted' )`)
+		assert.Contains(t, contentStr, "local rerun=()", "failed tests are not rerun by default")
 
 		// the generated script is valid bash
 		out, err := exec.Command("bash", "-n", scriptPath).CombinedOutput()
 		assert.NoError(t, err, "%s", out)
 	}
+}
+
+func TestGenerateScriptFiles_RerunFails(t *testing.T) {
+	cli := &CLI{
+		Nodes:       1,
+		Concurrency: 1,
+		ScriptsDir:  t.TempDir(),
+		RerunFails:  3,
+		nodeTests: []*types.NodeTest{{
+			Packages: []string{"pkg"},
+			Funcs:    map[string][]string{"pkg": {"TestA"}},
+		}},
+	}
+	tmpl, err := cli.parseTemplate()
+	require.NoError(t, err)
+	require.NoError(t, cli.generateScriptFiles(tmpl))
+
+	scriptPath := filepath.Join(cli.ScriptsDir, "test-node-0.sh")
+	content, err := os.ReadFile(scriptPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "local rerun=(--rerun-fails=3 --rerun-fails-report ")
+
+	out, err := exec.Command("bash", "-n", scriptPath).CombinedOutput()
+	assert.NoError(t, err, "%s", out)
 }
 
 func TestGenerateScriptFiles_CustomTemplate(t *testing.T) {

@@ -40,6 +40,8 @@ type TemplateData struct {
 	Flags string
 	// TestFlags is the raw list of test flags. Use with the shquote template function.
 	TestFlags []string
+	// RerunFails is the number of reruns of failed tests (gotestsum --rerun-fails). 0 disables reruns.
+	RerunFails int
 }
 
 // TestLine represents a single test process invocation in the test script

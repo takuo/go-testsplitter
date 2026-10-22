@@ -1,6 +1,6 @@
 module github.com/takuo/go-testsplitter
 
-go 1.27
+go 1.26.0
 
 require (
 	github.com/alecthomas/kong v1.16.1
